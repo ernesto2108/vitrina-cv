@@ -1,0 +1,189 @@
+{
+  "info": {
+    "name": "vitrina-cv API smoke tests",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "GET /health",
+      "item": [
+        {
+          "name": "happy path — engine ready",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/health",
+              "host": ["{{BASE_URL}}"],
+              "path": ["health"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST /extract-geometry",
+      "item": [
+        {
+          "name": "happy path — valid PNG",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "image",
+                  "type": "file",
+                  "src": "{{PNG_FILE_PATH}}"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/extract-geometry",
+              "host": ["{{BASE_URL}}"],
+              "path": ["extract-geometry"]
+            }
+          }
+        },
+        {
+          "name": "400 invalid_request — missing image field",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "wrongfield",
+                  "value": "dummy",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/extract-geometry",
+              "host": ["{{BASE_URL}}"],
+              "path": ["extract-geometry"]
+            }
+          }
+        },
+        {
+          "name": "400 invalid_request — empty image",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "image",
+                  "type": "file",
+                  "src": "{{EMPTY_FILE_PATH}}"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/extract-geometry",
+              "host": ["{{BASE_URL}}"],
+              "path": ["extract-geometry"]
+            }
+          }
+        },
+        {
+          "name": "422 unprocessable_image — corrupt bytes",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "image",
+                  "type": "file",
+                  "src": "{{CORRUPT_FILE_PATH}}"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/extract-geometry",
+              "host": ["{{BASE_URL}}"],
+              "path": ["extract-geometry"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST /preflight",
+      "item": [
+        {
+          "name": "happy path — valid PNG",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "image",
+                  "type": "file",
+                  "src": "{{PNG_FILE_PATH}}"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/preflight",
+              "host": ["{{BASE_URL}}"],
+              "path": ["preflight"]
+            }
+          }
+        },
+        {
+          "name": "400 invalid_request — missing image field",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "wrongfield",
+                  "value": "dummy",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/preflight",
+              "host": ["{{BASE_URL}}"],
+              "path": ["preflight"]
+            }
+          }
+        },
+        {
+          "name": "422 unprocessable_image — corrupt bytes",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "image",
+                  "type": "file",
+                  "src": "{{CORRUPT_FILE_PATH}}"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/preflight",
+              "host": ["{{BASE_URL}}"],
+              "path": ["preflight"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
