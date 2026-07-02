@@ -32,11 +32,15 @@ is_ready returns True immediately because this engine carries no ML weights
 
 from __future__ import annotations
 
+import logging
 import math
+import time
 from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
+
+_engine_logger = logging.getLogger(__name__)
 
 from vitrina_cv.engines.base import GeometryEngine
 
@@ -778,9 +782,12 @@ class OpenCVClassicEngine(GeometryEngine):
         Raises:
             ValueError: If image_bytes cannot be decoded as a PNG image.
         """
+        t0 = time.monotonic()
+
         # ---- 1. Decode -------------------------------------------------
         bgr = _decode_png(image_bytes)
         img_h, img_w = bgr.shape[:2]
+        t_decode = time.monotonic()
 
         # ---- 2. Grayscale ----------------------------------------------
         gray: NDArray[np.uint8] = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
@@ -798,6 +805,7 @@ class OpenCVClassicEngine(GeometryEngine):
         # ---- 6. Detect walls and consolidate (F3) ----------------------
         raw_walls = _detect_walls(wall_mask)
         walls = _consolidate_walls(raw_walls)
+        t_walls = time.monotonic()
 
         # ---- 7. Detect rooms with gap-closed mask (F1) -----------------
         # A separate closed mask bridges architectural openings so that CCA
@@ -805,12 +813,31 @@ class OpenCVClassicEngine(GeometryEngine):
         # use the original (unclosed) wall_mask.
         closed_wall_mask = _build_closed_wall_mask_for_rooms(wall_mask)
         rooms = _detect_rooms(closed_wall_mask, img_h, img_w)
+        t_rooms = time.monotonic()
 
         # ---- 8. Detect opening candidates, then NMS dedup (F2) ---------
         openings = _nms_openings(_detect_openings(walls))
+        t_openings = time.monotonic()
 
         # ---- 9. Derive scale (06-cv-04) --------------------------------
         scale = _detect_scale()
+        t_done = time.monotonic()
+
+        _engine_logger.info(
+            "cv_engine_extract_stages",
+            extra={
+                "image_width": img_w,
+                "image_height": img_h,
+                "duration_decode_ms": round((t_decode - t0) * 1000, 1),
+                "duration_segmentation_ms": round((t_walls - t_decode) * 1000, 1),
+                "duration_rooms_ms": round((t_rooms - t_walls) * 1000, 1),
+                "duration_openings_ms": round((t_openings - t_rooms) * 1000, 1),
+                "duration_total_ms": round((t_done - t0) * 1000, 1),
+                "walls_count": len(walls),
+                "rooms_count": len(rooms),
+                "openings_count": len(openings),
+            },
+        )
 
         # ---- 10. Assemble response -------------------------------------
         return Geometry(
