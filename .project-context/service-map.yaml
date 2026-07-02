@@ -1,0 +1,56 @@
+# service-map.yaml — vitrina-cv
+# Generado por context-init. Actualizado por reporter (vía context-nav/update.md) y cross-service-dev.
+# NO editar manualmente las secciones marcadas como [auto].
+
+meta:
+  last_updated: 2026-07-02
+  projects_root: /Users/ernestodiaz/projects
+
+services:
+  - name: vitrina-cv
+    description: Sidecar de computer vision para extracción determinista de geometría de planos arquitectónicos
+    local_path: vitrina-cv
+    stack: python
+    port: 8000
+
+    exposes:
+      rest:
+        - method: GET
+          path: /health
+          description: Healthcheck — liveness y readiness del servicio
+          auth: ninguna
+        - method: POST
+          path: /preflight
+          description: Gate de pre-vuelo con heurísticas puras de imagen (sin LLM)
+          auth: ninguna
+        - method: POST
+          path: /extract-geometry
+          description: Extracción determinista de geometría del plano (walls, rooms, openings, scale)
+          auth: ninguna
+
+    consumes:
+      services: []
+      events_subscribed: []
+
+    database:
+      engine: ninguna
+      shared_with: []
+
+    auth:
+      inbound: ninguna  # red privada interna; solo accesible desde vitrina (ADR-010)
+      outbound: ninguna  # el servicio no consume servicios externos
+
+  - name: vitrina
+    description: Backend Go — orquestador principal; descarga planos de S3, llama al LLM y consume vitrina-cv para geometría
+    local_path: vitrina
+    stack: go
+    port: 8080
+
+    exposes:
+      rest: []  # ver .project-context/ de vitrina para detalle completo
+
+    consumes:
+      services:
+        - name: vitrina-cv
+          via: rest
+          description: Obtiene geometría del plano via POST /extract-geometry y gate via POST /preflight
