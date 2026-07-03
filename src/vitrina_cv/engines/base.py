@@ -10,6 +10,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from vitrina_cv.config.settings import Settings
     from vitrina_cv.models import Geometry
 
 
@@ -47,11 +48,15 @@ class GeometryEngine(ABC):
         """
 
 
-def get_engine(cv_engine: str) -> GeometryEngine:
+def get_engine(cv_engine: str, settings: Settings | None = None) -> GeometryEngine:
     """Factory: resolve CV_ENGINE string to a GeometryEngine instance (ADR-008).
 
     Args:
         cv_engine: Engine name from settings.cv_engine.
+        settings: Application settings forwarded to the engine so it can read
+            runtime thresholds (e.g. upscale target / factor) without violating
+            the stateless-per-request contract — the Settings instance is
+            shared and read-only during a request.
 
     Returns:
         Concrete GeometryEngine implementation.
@@ -67,7 +72,7 @@ def get_engine(cv_engine: str) -> GeometryEngine:
 
     match cv_engine.lower():
         case "opencv":
-            return OpenCVClassicEngine()
+            return OpenCVClassicEngine(settings=settings)
         case "rasterscan":
             msg = (
                 "RasterScanEngine is not yet implemented (ADR-008 Phase 2). "

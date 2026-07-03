@@ -26,6 +26,7 @@ import cv2
 import numpy as np
 
 from vitrina_cv.models import PreflightReport
+from vitrina_cv.preprocessing import normalize_resolution
 
 if TYPE_CHECKING:
     from vitrina_cv.config.settings import Settings
@@ -237,9 +238,20 @@ def run_preflight(image_bytes: bytes, settings: Settings) -> PreflightReport:
         ValueError: If `image_bytes` cannot be decoded as a valid image.
     """
     img = _decode_image(image_bytes)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
+    # resolution_ok is evaluated on the ORIGINAL image (ADR-005):
+    # CV_PREFLIGHT_MIN_RESOLUTION now means "too small to rescue" — the floor
+    # below which upscaling cannot recover enough geometry.  A 300x300 image
+    # that passes this gate will be upscaled before reaching the CV engine.
     resolution_ok = _check_resolution(img, settings)
+
+    # All other checks (contrast, line density, rectilinear, orientation) are
+    # evaluated on the NORMALISED image because that is exactly what the CV
+    # engine will see — upscaling can reveal line structure that was invisible
+    # in the compressed thumbnail.
+    img_normalised, _ = normalize_resolution(img, settings)
+    gray = cv2.cvtColor(img_normalised, cv2.COLOR_BGR2GRAY)
+
     contrast_ok = _check_contrast(gray, settings.cv_preflight_min_contrast)
     line_density_ok = _check_line_density(gray, settings.cv_preflight_min_line_density)
 
@@ -257,8 +269,9 @@ def run_preflight(image_bytes: bytes, settings: Settings) -> PreflightReport:
     suggestions: list[str] = []
     if not resolution_ok:
         suggestions.append(
-            f"Sube una imagen de mayor resolución "
-            f"(mínimo {settings.preflight_min_width}x{settings.preflight_min_height} píxeles)."
+            f"La imagen es demasiado pequeña para extraer geometría útil "
+            f"(mínimo {settings.preflight_min_width}x{settings.preflight_min_height} píxeles). "
+            f"Sube una versión de mayor resolución del plano."
         )
     if not contrast_ok:
         suggestions.append(

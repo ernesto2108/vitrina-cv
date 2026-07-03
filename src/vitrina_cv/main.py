@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     settings = get_settings()
     logger.info("Initialising CV engine", extra={"cv_engine": settings.cv_engine})
-    engine = get_engine(settings.cv_engine)
+    engine = get_engine(settings.cv_engine, settings=settings)
     app.state.engine = engine
     logger.info(
         "CV engine ready",

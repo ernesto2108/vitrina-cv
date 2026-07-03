@@ -40,12 +40,8 @@ from typing import TYPE_CHECKING
 import cv2
 import numpy as np
 
-_engine_logger = logging.getLogger(__name__)
-
 from vitrina_cv.engines.base import GeometryEngine
-
-if TYPE_CHECKING:
-    from numpy.typing import NDArray
+from vitrina_cv.mask_cleanup import clean_mask
 from vitrina_cv.models import (
     Geometry,
     ImageSize,
@@ -56,6 +52,14 @@ from vitrina_cv.models import (
     ScaleSource,
     Wall,
 )
+from vitrina_cv.preprocessing import normalize_resolution
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
+    from vitrina_cv.config.settings import Settings
+
+_engine_logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Module-level tuning constants
@@ -756,8 +760,14 @@ class OpenCVClassicEngine(GeometryEngine):
     of the GeometryEngine contract and MUST NOT be accessed by routers.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         super().__init__()
+        # Settings forwarded from the factory — used for runtime thresholds
+        # (e.g. upscale target / factor).  May be None in unit tests that
+        # bypass get_engine(); engine falls back to module-level constants in
+        # that case (preprocessing.normalize_resolution handles its defaults
+        # independently via the Settings instance passed to it).
+        self._settings = settings
         # Intermediates for 06-cv-04 reuse — None until first extract() call.
         self._wall_mask: NDArray[np.uint8] | None = None
         self._gray: NDArray[np.uint8] | None = None
@@ -786,8 +796,34 @@ class OpenCVClassicEngine(GeometryEngine):
 
         # ---- 1. Decode -------------------------------------------------
         bgr = _decode_png(image_bytes)
-        img_h, img_w = bgr.shape[:2]
+        orig_h, orig_w = bgr.shape[:2]
         t_decode = time.monotonic()
+
+        # ---- 1b. Normalise resolution (upscale small images) -----------
+        # The engine's pixel constants are calibrated at ~2 000 px long side.
+        # Images arriving at 612x612 or 470x896 produce sub-threshold gaps,
+        # tiny room areas and near-zero line density before any detection runs.
+        # We upscale here so the entire pipeline — walls, rooms, openings,
+        # scale — operates in a single coherent pixel space.
+        # image_size in the response reflects the NORMALISED dimensions; no
+        # coordinate re-projection is needed.
+        if self._settings is not None:
+            bgr, upscale_factor = normalize_resolution(bgr, self._settings)
+        else:
+            upscale_factor = 1.0
+        img_h, img_w = bgr.shape[:2]
+
+        if upscale_factor > 1.0:
+            _engine_logger.info(
+                "cv_engine_upscale",
+                extra={
+                    "original_width": orig_w,
+                    "original_height": orig_h,
+                    "normalised_width": img_w,
+                    "normalised_height": img_h,
+                    "upscale_factor": round(upscale_factor, 3),
+                },
+            )
 
         # ---- 2. Grayscale ----------------------------------------------
         gray: NDArray[np.uint8] = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
@@ -797,6 +833,14 @@ class OpenCVClassicEngine(GeometryEngine):
 
         # ---- 4. Wall mask ----------------------------------------------
         wall_mask = _build_wall_mask(gray_blur)
+
+        # ---- 4b. Mask cleanup (noise: text, hatching, margin cotas) ----
+        # Applied AFTER binarisation and BEFORE Hough/CCA so that spurious
+        # components (achurado diagonals, cota lines, text labels) do not
+        # fragment walls or block CCA room enclosure.
+        # The preflight gate evaluates the image BEFORE this step (ADR-005).
+        if self._settings is not None:
+            wall_mask = clean_mask(wall_mask, self._settings)
 
         # ---- 5. Store intermediates (for 06-cv-04) ---------------------
         self._wall_mask = wall_mask
