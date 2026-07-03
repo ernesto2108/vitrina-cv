@@ -59,10 +59,12 @@ Servicio de computer vision (Python 3.12+ / FastAPI) que extrae geometría deter
 
 - **Módulo:** `src/vitrina_cv/mask_cleanup.py`
 - **Posición en pipeline:** paso 4b — después de `_build_wall_mask` y ANTES de HoughLinesP / CCA. El preflight NO lo ve.
-- **Pasos:** (1) quitar componentes pequeños en ambas dimensiones (texto), (2) apertura morfológica H+V con kernel L=150 px (mata achurado diagonal, conserva muros H/V), (3) recorte al componente mayor + margen (mata cotas perimetrales). Orden obligatorio: 1 → 2 → 3.
-- **Settings nuevas (CV_CLEANUP_*):** `CV_CLEANUP_ENABLED`, `CV_CLEANUP_TEXT_MAX_SIDE_PX=40`, `CV_CLEANUP_RECTILINEAR_LEN_PX=150`, `CV_CLEANUP_CROP_ENABLED`, `CV_CLEANUP_CROP_MARGIN_PX=20`.
+- **Pasos:** (1) quitar componentes pequeños en ambas dimensiones (texto), (2) apertura morfológica H+V con kernel L=150 px (mata achurado diagonal, conserva muros H/V), (3) filtro de grosor por componente vía distanceTransform (mata anotaciones/muebles/escaleras aislados), (4) recorte al componente mayor + margen (mata cotas perimetrales). Orden obligatorio: 1 → 2 → 3 → 4.
+- **Settings nuevas (CV_CLEANUP_*):** `CV_CLEANUP_ENABLED`, `CV_CLEANUP_TEXT_MAX_SIDE_PX=40`, `CV_CLEANUP_RECTILINEAR_LEN_PX=150`, `CV_CLEANUP_THICKNESS_FILTER_ENABLED=True`, `CV_CLEANUP_MIN_WALL_THICKNESS_PX=6` (auto-escalado por resolución), `CV_CLEANUP_CROP_ENABLED`, `CV_CLEANUP_CROP_MARGIN_PX=20`.
 - **Calibración L=150:** valor empírico sobre imagen 1049x2000; a resoluciones menores puede necesitar ajuste.
-- **Efecto medido:** imagen 2 (470x896→1049x2000): walls 852→118, rooms 0→4. Imagen 1 (2000x2000): rooms 6→6 (sin regresión).
+- **Bug corregido:** docstring de `CV_CLEANUP_RECTILINEAR_LEN_PX` decía "Default: 25" pero el valor real siempre fue 150. Corregido a "Default: 150".
+- **Efecto medido (3 pasos previos):** imagen 2 (470x896→1049x2000): walls 852→118, rooms 0→4. Imagen 1 (2000x2000): rooms 6→6 (sin regresión).
+- **Efecto medido (con paso 3 thickness filter, t=6):** plano_limpio: W 115→80 (-35 muebles aislados), R 6→6 (sin regresión). plano_denso: W 118→111 (-7 aislados), R 4→4 (sin regresión). Limitación: en planos densos donde anotaciones están conectadas al trazo principal el impacto del filtro es menor (el max-dist del componente es alto por los muros exteriores).
 
 ## Convenciones establecidas
 

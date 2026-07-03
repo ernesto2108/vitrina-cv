@@ -157,10 +157,19 @@ Comandos:
 
 ### clean_mask — pipeline de limpieza de máscara binaria — mask_cleanup.py
 - **Archivo:** `src/vitrina_cv/mask_cleanup.py`
-- **Qué hace:** orquestador de tres pasos puros aplicado DESPUÉS de binarización y ANTES de Hough/CCA: (1) `remove_small_components` elimina componentes con bbox pequeño en ambos lados (mata texto/dígitos); (2) `retain_rectilinear` hace apertura morfológica direccional H+V (mata achurado diagonal); (3) `crop_to_main_component` pone a cero lo exterior al bbox del componente más grande + margen (mata cotas perimetrales). El preflight NO se toca — sigue evaluando la imagen sin limpiar.
+- **Qué hace:** orquestador de cuatro pasos puros aplicado DESPUÉS de binarización y ANTES de Hough/CCA: (1) `remove_small_components` — elimina componentes con bbox pequeño en ambos lados (texto/dígitos); (2) `retain_rectilinear` — apertura morfológica H+V (mata achurado diagonal); (3) `crop_to_main_component` — pone a cero lo exterior al bbox del componente más grande + margen (mata cotas perimetrales y marcos de scan); (4) `filter_thin_strokes` — reconstrucción geodésica acotada desde semillas gruesas (mata cotas interiores, muebles, escaleras). El preflight NO se toca.
 - **Cuándo usar:** llamar desde `OpenCVClassicEngine.extract()` paso 4b, solo cuando `settings is not None`. Master switch: `CV_CLEANUP_ENABLED` (default True).
-- **Thresholds en Settings:** `CV_CLEANUP_TEXT_MAX_SIDE_PX=40`, `CV_CLEANUP_RECTILINEAR_LEN_PX=150` (calibrado para 2000 px; a menor resolución bajar el valor), `CV_CLEANUP_CROP_ENABLED=True`, `CV_CLEANUP_CROP_MARGIN_PX=20`.
-- **Anti-pattern:** aplicar el cleanup antes del upscale (los pixels son demasiado pequeños); pasar la máscara limpiada al preflight (viola ADR-005); hardcodear los thresholds fuera de Settings.
+- **Thresholds en Settings:** `CV_CLEANUP_TEXT_MAX_SIDE_PX=40`, `CV_CLEANUP_RECTILINEAR_LEN_PX=150`, `CV_CLEANUP_CROP_ENABLED=True`, `CV_CLEANUP_CROP_MARGIN_PX=20`, `CV_CLEANUP_THICKNESS_FILTER_ENABLED=True`, `CV_CLEANUP_MIN_WALL_THICKNESS_PX=6` (calibrado para 2000 px; auto-escalado), `CV_CLEANUP_THICKNESS_PRECLOSE_PX=9`.
+- **Orden obligatorio: 1 → 2 → 3(crop) → 4(filter).** Crop antes del filtro mantiene el perímetro exterior conectado; si se invierte el orden, el filtro fragmenta el perímetro y crop selecciona solo un stub de pared.
+- **Anti-pattern:** aplicar el cleanup antes del upscale; pasar la máscara limpiada al preflight (ADR-005); invertir el orden de crop y filter; hardcodear thresholds fuera de Settings.
+
+### filter_thin_strokes — filtro geodésico por grosor de trazo — mask_cleanup.py
+- **Archivo:** `src/vitrina_cv/mask_cleanup.py`
+- **Qué hace:** reconstrucción geodésica acotada en tres fases. **Pre-close:** aplica `MORPH_CLOSE` con kernel `CV_CLEANUP_THICKNESS_PRECLOSE_PX × CV_CLEANUP_THICKNESS_PRECLOSE_PX` (default 9 px) sobre una COPIA de la máscara para rellenar huecos entre dobles líneas de pared. **Fase 1 — semillas:** `distanceTransform` sobre la máscara pre-cerrada; semillas = `dist >= T/2` intersectadas de vuelta con la máscara original. **Fase 2 — dilatación geodésica acotada:** `ceil(T)` iteraciones de dilatación 3x3 con AND sobre la máscara original. **Fase 3:** devuelve los píxeles alcanzados; los trazos delgados no alcanzados se descartan.
+- **Cuándo usar:** paso 4 del cleanup (DESPUÉS del crop). Gateado por `CV_CLEANUP_THICKNESS_FILTER_ENABLED`. El umbral `T` se escala por `long_side / CV_UPSCALE_TARGET_PX`.
+- **Resultado calibrado en fixtures (2000 px):** plano_limpio W=115→80/R=6 (sin regresión); plano_denso_anotado W=118→84/R=5 (reducción sustancial, rooms ≥ 4).
+- **Por qué pre-close:** planos con dobles líneas paralelas con hueco > 3 px no quedan suficientemente engrosados por el `(3,3)` close de `_build_wall_mask`; el pre-close (9 px) cierra huecos de hasta ~8 px solo para el cálculo de semillas — la máscara real no se modifica.
+- **Anti-pattern:** correr el filtro ANTES del crop (el perímetro se fragmenta en 27+ componentes y crop selecciona solo un stub → rooms=0); usar distanceTransform sobre la máscara completa sin pre-close en planos de doble línea (grosor efectivo = 3 px → sin semillas → todo se descarta).
 
 ### normalize_resolution — preprocesamiento de upscale antes del pipeline CV — preprocessing.py
 - **Archivo:** `src/vitrina_cv/preprocessing.py`

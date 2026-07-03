@@ -1,7 +1,7 @@
 # Context Navigator — vitrina-cv
 
 last_full_scan: 2026-07-02
-last_updated: 2026-07-02T19:30:00  # reporter delta: mask_cleanup.py + CV_CLEANUP_* settings + integración en extract()
+last_updated: 2026-07-03T10:15:00  # reporter delta: filter_thin_strokes reimplementado como reconstrucción geodésica acotada con pre-close (CV_CLEANUP_THICKNESS_PRECLOSE_PX=9); orden de pipeline corregido a crop→filter (paso 3→4); nuevo setting CV_CLEANUP_THICKNESS_PRECLOSE_PX
 coverage: bootstrap
 
 ## Índice
