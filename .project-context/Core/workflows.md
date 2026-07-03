@@ -119,3 +119,6 @@ ruff check --fix . && ruff format .
 | `CV_PREFLIGHT_MIN_LINE_DENSITY` | `0.05` | Umbral de densidad de líneas del gate (ADR-005) — evaluado sobre imagen normalizada |
 | `CV_UPSCALE_TARGET_PX` | `2000` | Lado mayor objetivo tras normalización. Imágenes ya >= este valor no se modifican (factor 1.0). |
 | `CV_UPSCALE_MAX_FACTOR` | `4.0` | Cap del factor de upscale; evita inflar thumbnails minúsculos a tamaños impracticables. |
+| `CV_SCALE_OCR_ENABLED` | `true` | Master switch de OCR de cotas (ADR-011). En `false`, `_detect_scale` retorna `source=none` sin llamar a tesseract. |
+| `CV_SCALE_OCR_CONSISTENCY_TOLERANCE` | `0.10` | Desviación relativa máxima aceptada entre lecturas de cota para el consensus check. `0.10` = 10%. |
+| `CV_SCALE_OCR_TESSERACT_CMD` | `` | Path opcional al binario tesseract. Vacío = autodetección en PATH. Ejemplo: `/opt/homebrew/bin/tesseract`. |

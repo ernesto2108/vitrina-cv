@@ -119,6 +119,7 @@ class GeometryEngine(ABC):
 - `scale` es opcional — su ausencia (`source="none"`) no es un error; nunca bloquear la respuesta por falta de cotas.
 - `openings[].type_candidate` es tentativo — el LLM en vitrina decide el tipo final; el servicio no debe filtrar ni priorizar candidatas.
 - Las coordenadas están en pixeles de la imagen recibida, no en coordenadas del sistema de vitrina — vitrina hace el mapeo.
+- **Close asimétrico para detección de habitaciones:** el cierre morfológico direccional antes de CCA usa kernels H y V independientes (`CV_ROOM_CLOSE_H_GAP_PX=80`, `CV_ROOM_CLOSE_V_GAP_PX=160`). Un kernel H igual al V (160px) destruye habitaciones estrechas (~130px ≈ 1.0m) al rellenar el espacio entre dos paredes verticales paralelas. El kernel H debe ser menor que el ancho de la habitación más estrecha esperada (baños ≥ 0.6m en planos peruanos densos).
 
 ## Deuda técnica
 

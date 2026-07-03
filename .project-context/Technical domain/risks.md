@@ -37,6 +37,7 @@ last_updated: 2026-07-02
 | Archivo | Líneas | Razón |
 |---------|--------|-------|
 | `src/vitrina_cv/mask_cleanup.py` | ~200 | Módulo nuevo; podría integrarse en `preprocessing.py` si crece el nro de módulos auxiliares |
+| `src/vitrina_cv/scale_ocr.py` | ~340 | Módulo OCR (ADR-011); candidato a tests unitarios granulares de `_consistent_median`, `_infer_unit_and_metres`, `_distance_point_to_seg` — actualmente cubiertos solo por integración |
 
 ### CV_CLEANUP_RECTILINEAR_LEN_PX — calibración frágil por resolución
 - **Dónde:** `src/vitrina_cv/mask_cleanup.py`, `src/vitrina_cv/config/settings.py`
@@ -58,6 +59,7 @@ Ninguno — repo vacío. Actualizar con el primer scaffold.
 
 - **opencv-python:** versión fija recomendada — cambios de versión pueden alterar resultados de binarización o detección de contornos; pin de versión obligatorio.
 - **vitrina (Go, repo hermano):** el cliente Go consume el contrato REST; cualquier cambio de contrato rompe la integración — requerir coordinación cross-repo via ADR.
+- **pytesseract + tesseract-ocr (ADR-011):** dependencia operativa del binario del SO (`tesseract-ocr`). El Dockerfile debe instalar `tesseract-ocr` (trabajo de devops pendiente). Sin el binario, `CV_SCALE_OCR_ENABLED=true` degrada silenciosamente a `source=none`; nunca rompe el endpoint. Limitación conocida: en scans de baja resolución (lado largo < ~3000px en el original) el texto de cotas puede ser demasiado pequeño para tesseract incluso tras el upscale interno a 4000px — el consistency check rechaza lecturas espurias y retorna `source=none` honestamente.
 
 ## Áreas sin tests
 

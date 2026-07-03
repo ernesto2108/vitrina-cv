@@ -131,11 +131,17 @@ Comandos:
 - **Cuándo usar:** al ajustar los rangos heurísticos; la función es el único punto de cambio para la clasificación de tipo
 - **Anti-pattern:** usar literales numéricos directamente en la comparación; emitir un tipo definitivo (`door`/`window`) cuando el gap es ambiguo
 
-### _detect_scale stub + extension point — engines/opencv_classic.py
-- **Archivo:** `src/vitrina_cv/engines/opencv_classic.py`
-- **Qué hace:** devuelve `Scale(source="none")` siempre en Fase 1; el docstring documenta el procedimiento completo de integración futura con OCR (detección de líneas de cota → OCR → `px_per_unit`); es el único punto de extensión para escala
-- **Cuándo usar:** cuando se integre OCR — modificar solo esta función; agregar ADR antes de añadir dependencias de OCR
-- **Anti-pattern:** retornar error cuando no hay cotas (viola ADR-003: `scale.source=none` nunca es error); añadir dependencias OCR sin ADR
+### _detect_scale con OCR (ADR-011) — engines/opencv_classic.py + scale_ocr.py
+- **Archivo:** `src/vitrina_cv/engines/opencv_classic.py:556`, `src/vitrina_cv/scale_ocr.py`
+- **Qué hace:** `_detect_scale(gray, settings)` ya no es un stub; delega a `detect_scale_from_ocr()` cuando `CV_SCALE_OCR_ENABLED=true`. El módulo `scale_ocr.py` ejecuta: (1) upscale a 4000px para OCR, (2) pytesseract PSM11 con whitelist de dígitos, (3) HoughLinesP en imagen gris para detectar líneas de cota, (4) asociación token-línea por distancia mínima <= 120px, (5) validación de consistencia >= 2 lecturas dentro del 10% de la mediana. Devuelve `Scale(source="cotas", px_per_unit, unit="m")` o `Scale(source="none")`.
+- **Cuándo usar:** la lógica OCR vive exclusivamente en `scale_ocr.py`; el engine es un wrapper delgado
+- **Anti-pattern:** retornar error cuando no hay cotas (viola ADR-003); forzar un resultado cuando el OCR no alcanza consenso; aceptar una escala con una sola lectura sin corroboración
+
+### Degradación elegante ante dependencia opcional (pytesseract) — scale_ocr.py
+- **Archivo:** `src/vitrina_cv/scale_ocr.py:118`
+- **Qué hace:** patrón de lazy import con flag de módulo (`_PYTESSERACT_IMPORT_FAILED`). El import de pytesseract ocurre solo en tiempo de ejecución; si falla (binario no instalado o import error), se loguea un warning único y se retorna `Scale(source=none)`. El endpoint nunca levanta excepción por ausencia del binario.
+- **Cuándo usar:** toda dependencia **opcional** del servicio que no debe bloquear el endpoint si no está disponible en runtime
+- **Anti-pattern:** import a nivel de módulo de una dependencia opcional (rompe el startup si no está instalada); propagar excepciones de la dependencia opcional al caller
 
 ### _build_closed_wall_mask_for_rooms — cierre morfológico para CCA — engines/opencv_classic.py
 - **Archivo:** `src/vitrina_cv/engines/opencv_classic.py`

@@ -31,6 +31,7 @@ last_updated: 2026-07-02
 ### extract-geometry
 - **Aberturas como candidatas (ADR-009):** el motor CV no decide el tipo final de una abertura. Emite `type_candidate` tentativo + `confidence`; la clasificación final la hace el LLM en vitrina.
 - **Motor intercambiable (ADR-008):** el router lee `CV_ENGINE` y delega a la interfaz `GeometryEngine`; nunca instancia el motor concreto directamente en el handler.
+- **Close asimétrico H/V para detección de habitaciones:** `_build_closed_wall_mask_for_rooms` aplica cierre morfológico con kernels H (`CV_ROOM_CLOSE_H_GAP_PX`, default 80px) y V (`CV_ROOM_CLOSE_V_GAP_PX`, default 160px) independientes. El kernel H debe ser estrictamente menor que el ancho de la habitación más estrecha esperada (baños peruanos típicos ≥ 130px a 2000px). Nunca usar el mismo valor para H y V en planos residenciales densos — un H=160px destruye habitaciones de ~1.0m.
 
 ### preflight
 - **Sin LLM (ADR-005):** el gate evalúa únicamente con heurísticas deterministas de imagen (resolución, contraste, densidad de líneas, orientación). Ninguna llamada a servicio externo.

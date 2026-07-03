@@ -25,10 +25,11 @@ last_updated: 2026-07-02
 ## Estructurales
 
 ### Settings por Pydantic BaseSettings — config/settings.py
-- **Archivo:** `config/settings.py` (por crear)
-- **Qué encapsula:** lectura y validación de variables de entorno (`CV_ENGINE`, `CV_MODEL_PATH`, `CV_PREFLIGHT_*`)
-- **Firma prevista:** clase `Settings(BaseSettings)` con valores por defecto y validación de tipos
-- **Cuándo usar:** al agregar cualquier umbral o configuración nueva — nunca hardcodear valores
+- **Archivo:** `config/settings.py`
+- **Qué encapsula:** lectura y validación de variables de entorno (`CV_ENGINE`, `CV_MODEL_PATH`, `CV_PREFLIGHT_*`, `CV_CLEANUP_*`, `CV_ROOM_CLOSE_*`)
+- **Firma:** clase `Settings(BaseSettings)` con `Field(default=..., gt=0, description=...)` — descripción obligatoria en cada campo
+- **Cuándo usar:** al agregar cualquier umbral o configuración nueva — nunca hardcodear valores en módulos de engine
+- **Patrón de constants fallback:** las constantes de módulo (`_ROOM_CLOSE_GAP_PX`, etc.) sirven de fallback cuando `self._settings is None`; los valores reales de producción siempre vienen de `Settings`
 
 ## De comportamiento
 
