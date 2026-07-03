@@ -114,6 +114,8 @@ ruff check --fix . && ruff format .
 |---|---|---|
 | `CV_ENGINE` | `opencv` | Motor CV activo. Fase 1: `opencv`. Futuro: `rasterscan` (ADR-008) |
 | `CV_MODEL_PATH` | `` (vacío) | Ruta a pesos de motor ML. Opcional/futuro — no usada en Fase 1 (ADR-008) |
-| `CV_PREFLIGHT_MIN_RESOLUTION` | `800x600` | Umbral de resolución mínima del gate de pre-vuelo (ADR-005) |
-| `CV_PREFLIGHT_MIN_CONTRAST` | `0.35` | Umbral de contraste del gate (ADR-005) |
-| `CV_PREFLIGHT_MIN_LINE_DENSITY` | `0.05` | Umbral de densidad de líneas del gate (ADR-005) |
+| `CV_PREFLIGHT_MIN_RESOLUTION` | `300x300` | Piso no rescatable (imagen original antes de upscale). Imágenes bajo este umbral no producen geometría útil ni con upscale (ADR-005). Cambiado de 800x600. |
+| `CV_PREFLIGHT_MIN_CONTRAST` | `0.35` | Umbral de contraste del gate (ADR-005) — evaluado sobre imagen normalizada |
+| `CV_PREFLIGHT_MIN_LINE_DENSITY` | `0.05` | Umbral de densidad de líneas del gate (ADR-005) — evaluado sobre imagen normalizada |
+| `CV_UPSCALE_TARGET_PX` | `2000` | Lado mayor objetivo tras normalización. Imágenes ya >= este valor no se modifican (factor 1.0). |
+| `CV_UPSCALE_MAX_FACTOR` | `4.0` | Cap del factor de upscale; evita inflar thumbnails minúsculos a tamaños impracticables. |

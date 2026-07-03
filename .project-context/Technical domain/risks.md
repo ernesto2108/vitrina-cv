@@ -36,7 +36,13 @@ last_updated: 2026-07-02
 
 | Archivo | Líneas | Razón |
 |---------|--------|-------|
-| — | — | Repo recién creado — actualizar con el primer scaffold |
+| `src/vitrina_cv/mask_cleanup.py` | ~200 | Módulo nuevo; podría integrarse en `preprocessing.py` si crece el nro de módulos auxiliares |
+
+### CV_CLEANUP_RECTILINEAR_LEN_PX — calibración frágil por resolución
+- **Dónde:** `src/vitrina_cv/mask_cleanup.py`, `src/vitrina_cv/config/settings.py`
+- **Descripción:** el valor default L=150 fue calibrado sobre una imagen 1049x2000. A resoluciones distintas (especialmente < 800px de lado corto, o > 2000px sin upscale) el kernel puede ser demasiado largo (elimina muros reales) o demasiado corto (no elimina achurado). El test `test_especial1_celdas_diminutas_filtradas_por_diseno` falló tras introducir el cleanup: comportamiento esperado cambió de rooms=[] a rooms=[1_room].
+- **Workaround:** ajustar via env var `CV_CLEANUP_RECTILINEAR_LEN_PX`; considerar escalar L proporcionalmente al lado mayor de la imagen en una iteración futura.
+- **Test pendiente:** el `tester` debe actualizar `test_especial1_celdas_diminutas_filtradas_por_diseno` para reflejar el nuevo comportamiento esperado con cleanup activo.
 
 ### TODOs y FIXMEs con impacto
 

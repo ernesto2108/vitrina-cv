@@ -1,7 +1,7 @@
 # Context Navigator — vitrina-cv
 
 last_full_scan: 2026-07-02
-last_updated: 2026-07-02T15:30:00  # reporter delta: 06-cv-06 endpoints reales + taxonomía errores + health + warmup
+last_updated: 2026-07-02T19:30:00  # reporter delta: mask_cleanup.py + CV_CLEANUP_* settings + integración en extract()
 coverage: bootstrap
 
 ## Índice

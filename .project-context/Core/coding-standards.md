@@ -155,6 +155,20 @@ Comandos:
 - **Cuándo usar:** siempre después de `_detect_openings`; aplicar como post-procesado final antes de ensamblar `Geometry`
 - **Anti-pattern:** aumentar `_NMS_CENTER_DIST_PX` > 50 px — colapsa aberturas reales cercanas (puerta doble, ventana corrida)
 
+### clean_mask — pipeline de limpieza de máscara binaria — mask_cleanup.py
+- **Archivo:** `src/vitrina_cv/mask_cleanup.py`
+- **Qué hace:** orquestador de tres pasos puros aplicado DESPUÉS de binarización y ANTES de Hough/CCA: (1) `remove_small_components` elimina componentes con bbox pequeño en ambos lados (mata texto/dígitos); (2) `retain_rectilinear` hace apertura morfológica direccional H+V (mata achurado diagonal); (3) `crop_to_main_component` pone a cero lo exterior al bbox del componente más grande + margen (mata cotas perimetrales). El preflight NO se toca — sigue evaluando la imagen sin limpiar.
+- **Cuándo usar:** llamar desde `OpenCVClassicEngine.extract()` paso 4b, solo cuando `settings is not None`. Master switch: `CV_CLEANUP_ENABLED` (default True).
+- **Thresholds en Settings:** `CV_CLEANUP_TEXT_MAX_SIDE_PX=40`, `CV_CLEANUP_RECTILINEAR_LEN_PX=150` (calibrado para 2000 px; a menor resolución bajar el valor), `CV_CLEANUP_CROP_ENABLED=True`, `CV_CLEANUP_CROP_MARGIN_PX=20`.
+- **Anti-pattern:** aplicar el cleanup antes del upscale (los pixels son demasiado pequeños); pasar la máscara limpiada al preflight (viola ADR-005); hardcodear los thresholds fuera de Settings.
+
+### normalize_resolution — preprocesamiento de upscale antes del pipeline CV — preprocessing.py
+- **Archivo:** `src/vitrina_cv/preprocessing.py`
+- **Qué hace:** función pura `normalize_resolution(img, settings) -> (img, factor)` que upscalea imágenes pequeñas vía `cv2.INTER_CUBIC` hasta `CV_UPSCALE_TARGET_PX` (default 2000 px de lado mayor), capeado por `CV_UPSCALE_MAX_FACTOR` (default 4.0). Nunca downscalea; si `max(h,w) >= target` retorna la imagen sin cambios y factor `1.0`.
+- **Cuándo usar:** integrado en `OpenCVClassicEngine.extract()` tras decode, antes del pipeline completo; también en `run_preflight()` para los checks de calidad (contraste, line_density, rectilinear) sobre imagen normalizada.
+- **Razón de ser:** el motor OpenCV está calibrado en píxeles absolutos (`_DOOR_GAP_MIN_PX=30`, `_WALL_THICKNESS_EST_PX=10`, `_MIN_ROOM_AREA_PX=2000`). Imágenes de 612x612 o 470x896 producen gaps sub-umbral y rooms inexistentes sin este paso.
+- **Anti-pattern:** aplicar upscale dentro de `_decode_png` (mezcla decodificación con normalización); reescalar coordenadas de vuelta a espacio original (toda la geometría vive en espacio normalizado — ADR-003).
+
 ### FastAPI lifespan con app.state para motor CV singleton — main.py
 - **Archivo:** `src/vitrina_cv/main.py`
 - **Qué hace:** instancia el motor CV una sola vez en el lifespan de FastAPI (`get_engine(settings.cv_engine)`) y lo almacena en `app.state.engine`; los routers lo recuperan via `request.app.state.engine` sin reinstanciar por request
