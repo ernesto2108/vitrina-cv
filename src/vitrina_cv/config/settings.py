@@ -27,11 +27,18 @@ Defaults:
                                                   disappears; true H/V walls (≥1 px run) survive.
                                                   Limitation: genuine diagonal walls are also removed —
                                                   acceptable because the engine is rectilinear-oriented.)
-  CV_CLEANUP_CROP_ENABLED         = true         (step 3: crop mask to bbox of largest connected
+  CV_CLEANUP_CROP_ENABLED              = true     (step 3: crop mask to bbox of largest connected
                                                   component + CV_CLEANUP_CROP_MARGIN_PX. Eliminates
                                                   dimension lines and scan-border artefacts outside
-                                                  the main floor-plan loop.)
-  CV_CLEANUP_CROP_MARGIN_PX       = 20           (step 3 margin in px around the main component bbox)
+                                                  the main floor-plan loop. Running before step 4
+                                                  keeps the perimeter intact for the filter.)
+  CV_CLEANUP_CROP_MARGIN_PX            = 20       (step 3 margin in px around the main component bbox)
+  CV_CLEANUP_THICKNESS_FILTER_ENABLED  = true    (step 4 on/off switch for thin-stroke filter)
+  CV_CLEANUP_MIN_WALL_THICKNESS_PX     = 6       (step 4: minimum wall stroke max-thickness in px,
+                                                  calibrated for ~2000 px images; auto-scaled
+                                                  for larger images based on CV_UPSCALE_TARGET_PX)
+  CV_CLEANUP_THICKNESS_PRECLOSE_PX     = 9       (step 4: pre-close kernel size (px) used to bridge
+                                                  double-wall gaps before computing distance seeds)
 
   PORT                            = 8000
 """
@@ -146,7 +153,7 @@ class Settings(BaseSettings):
             "cleaned = open_h | open_v. "
             "Diagonal hatch lines have H/V runs of 1-3 px and vanish; "
             "true H/V walls (≥L px continuous run) survive. "
-            "Limitation: genuine diagonal walls are also removed. Default: 25."
+            "Limitation: genuine diagonal walls are also removed. Default: 150."
         ),
     )
     cv_cleanup_crop_enabled: bool = Field(
@@ -156,6 +163,9 @@ class Settings(BaseSettings):
             "Finds the largest connected component of the already-cleaned mask, "
             "takes its bounding box + CV_CLEANUP_CROP_MARGIN_PX, and zeroes out "
             "everything outside. Removes perimeter dimension lines and scan borders. "
+            "Running this before the thin-stroke filter (step 4) keeps the "
+            "exterior wall perimeter connected, preventing the filter from "
+            "fragmenting it and causing crop to select only a wall stub. "
             "Default: True."
         ),
     )
@@ -166,6 +176,52 @@ class Settings(BaseSettings):
             "Step 3 margin (px) added on each side of the largest-component "
             "bounding box before cropping. Prevents clipping walls that touch "
             "or nearly touch the bbox edge. Default: 20."
+        ),
+    )
+    cv_cleanup_thickness_filter_enabled: bool = Field(
+        default=True,
+        description=(
+            "Step 4 — thin-stroke filter master switch. "
+            "When True, a bounded geodesic reconstruction from thick-stroke seeds "
+            "(distanceTransform >= CV_CLEANUP_MIN_WALL_THICKNESS_PX / 2) removes "
+            "annotation lines, furniture outlines and stair lines while preserving "
+            "thick wall strokes. Set to False to bypass step 4 entirely. Default: True."
+        ),
+    )
+    cv_cleanup_min_wall_thickness_px: int = Field(
+        default=6,
+        ge=1,
+        description=(
+            "Step 4 — minimum wall stroke thickness (px) for seed extraction. "
+            "Seeds are pixels whose distance-to-background in the pre-closed mask "
+            "is >= this value / 2; seeds correspond to the cores of strokes at "
+            "least this many pixels wide. A bounded geodesic dilation then recovers "
+            "the full extent of wall strokes from those seeds. Strokes thinner than "
+            "this value that are not within reach of a seed (cotas, furniture "
+            "outlines, stair lines) are discarded. "
+            "The threshold is automatically scaled proportionally when the image "
+            "long side differs from CV_UPSCALE_TARGET_PX, so the same default "
+            "works for larger images without tuning. "
+            "Calibrated for ~2000 px normalised images. Default: 6."
+        ),
+    )
+    cv_cleanup_thickness_preclose_px: int = Field(
+        default=9,
+        ge=1,
+        description=(
+            "Step 4 — side length (px) of the square kernel used for the "
+            "pre-close operation before distance-transform seed extraction. "
+            "This morphological close is applied to a copy of the mask (not "
+            "the mask itself) to bridge gaps between the two parallel lines "
+            "of double-wall notation. Walls drawn as two thin parallel strands "
+            "with a gap of up to ~(preclose_kernel - 1) px are treated as a "
+            "single thick stroke for seed-extraction purposes, while isolated "
+            "thin annotation lines remain unaffected. "
+            "Increasing this value helps plans with wider double-wall gaps; "
+            "decreasing it (or setting to 1 to disable) is appropriate when "
+            "walls are drawn as single solid strokes and nearby annotation "
+            "lines must not be merged for seed computation. "
+            "Calibrated for ~2000 px normalised images. Default: 9."
         ),
     )
 
