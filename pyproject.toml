@@ -16,6 +16,7 @@ dependencies = [
     # CV dependencies (used in tasks 06-cv-03/04/05)
     "opencv-python>=4.10.0",
     "numpy>=1.26.0",
+    "pytesseract>=0.3.13",
 ]
 
 [project.optional-dependencies]

@@ -40,6 +40,32 @@ Defaults:
   CV_CLEANUP_THICKNESS_PRECLOSE_PX     = 9       (step 4: pre-close kernel size (px) used to bridge
                                                   double-wall gaps before computing distance seeds)
 
+  Room detection (directional close before CCA):
+  CV_ROOM_CLOSE_H_GAP_PX          = 80          (horizontal morphological close gap (px). Bridges
+                                                  openings aligned with vertical walls. Must be
+                                                  smaller than the narrowest expected room width to
+                                                  avoid filling narrow rooms like bathrooms.
+                                                  Default: 80 ≈ 0.6 m at 2000 px.)
+  CV_ROOM_CLOSE_V_GAP_PX          = 160         (vertical morphological close gap (px). Bridges
+                                                  openings aligned with horizontal walls (e.g. wide
+                                                  sliding doors or passages). Default: 160 ≈ 1.2 m
+                                                  at 2000 px.)
+
+  Scale OCR (ADR-011 — pytesseract + tesseract binary, optional):
+  CV_SCALE_OCR_ENABLED            = true         (master switch for OCR-based scale detection.
+                                                  When false, _detect_scale returns source=none
+                                                  unconditionally — same as Phase 1 behaviour.
+                                                  Set to false in environments without the
+                                                  tesseract-ocr binary. Default: true.)
+  CV_SCALE_OCR_CONSISTENCY_TOLERANCE = 0.10     (maximum relative deviation from the median
+                                                  px_per_unit across all cota readings before an
+                                                  individual reading is discarded as an outlier.
+                                                  0.10 = 10%. Default: 0.10.)
+  CV_SCALE_OCR_TESSERACT_CMD      = ""          (optional override for the path to the tesseract
+                                                  binary. Empty string means auto-detect via PATH.
+                                                  Example: "/opt/homebrew/bin/tesseract".
+                                                  Default: "" (auto).)
+
   PORT                            = 8000
 """
 
@@ -222,6 +248,60 @@ class Settings(BaseSettings):
             "walls are drawn as single solid strokes and nearby annotation "
             "lines must not be merged for seed computation. "
             "Calibrated for ~2000 px normalised images. Default: 9."
+        ),
+    )
+
+    # --- Room detection (directional close before CCA) ---
+    cv_room_close_h_gap_px: int = Field(
+        default=80,
+        gt=0,
+        description=(
+            "Room detection — horizontal morphological close gap (px). "
+            "Bridges openings in vertical walls (e.g. door gaps). "
+            "Must be smaller than the narrowest expected room width to avoid "
+            "filling narrow rooms such as bathrooms. "
+            "Calibrated for ~2000 px normalised images. Default: 80 (≈0.6 m)."
+        ),
+    )
+    cv_room_close_v_gap_px: int = Field(
+        default=160,
+        gt=0,
+        description=(
+            "Room detection — vertical morphological close gap (px). "
+            "Bridges openings in horizontal walls (e.g. wide sliding doors "
+            "or passages). "
+            "Calibrated for ~2000 px normalised images. Default: 160 (≈1.2 m)."
+        ),
+    )
+
+    # --- Scale OCR (ADR-011) ---
+    cv_scale_ocr_enabled: bool = Field(
+        default=True,
+        description=(
+            "Master switch for OCR-based scale detection (ADR-011). "
+            "When False, _detect_scale returns source=none unconditionally — "
+            "identical to Phase 1 behaviour. Set to False in environments "
+            "without the tesseract-ocr binary. Default: True."
+        ),
+    )
+    cv_scale_ocr_consistency_tolerance: float = Field(
+        default=0.10,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Maximum relative deviation from the median px_per_unit across all "
+            "cota readings before a reading is discarded as an outlier. "
+            "0.10 = 10%. Readings outside this band are dropped; if fewer than "
+            "2 consistent readings remain, scale falls back to source=none. "
+            "Default: 0.10."
+        ),
+    )
+    cv_scale_ocr_tesseract_cmd: str = Field(
+        default="",
+        description=(
+            "Optional override for the path to the tesseract binary. "
+            "Empty string = auto-detect via PATH. "
+            "Example: '/opt/homebrew/bin/tesseract'. Default: '' (auto)."
         ),
     )
 

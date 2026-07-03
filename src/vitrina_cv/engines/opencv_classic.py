@@ -53,6 +53,7 @@ from vitrina_cv.models import (
     Wall,
 )
 from vitrina_cv.preprocessing import normalize_resolution
+from vitrina_cv.scale_ocr import detect_scale_from_ocr
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -553,33 +554,39 @@ def _detect_openings(walls: list[Wall]) -> list[Opening]:
     return openings
 
 
-def _detect_scale() -> Scale:
-    """Attempt to detect scale from dimension annotations in the floor plan.
+def _detect_scale(
+    gray: NDArray[np.uint8] | None,
+    settings: Settings | None,
+) -> Scale:
+    """Detect scale from dimension annotations (cotas) via OCR (ADR-011).
 
-    Phase 1 — always returns source="none".
+    Wraps detect_scale_from_ocr() with a thin guard layer.  Never raises.
 
-    Reliable dimension-line reading requires OCR to extract the numeric value
-    adjacent to each cota line.  In Phase 1, no OCR engine is available in
-    this service, so the function returns a "none" scale unconditionally.
-    This never causes an error response (ADR-003: scale is optional).
+    When CV_SCALE_OCR_ENABLED is False (or settings is None, or gray is None),
+    falls back to source="none" — identical to the Phase 1 stub behaviour.
 
-    Extension point for a future phase with OCR:
-      1. Detect thin horizontal/vertical lines with arrowhead or tick
-         terminations (distinguishes dimension lines from wall segments).
-      2. Run an OCR engine (e.g. tesseract via pytesseract, or an LLM vision
-         call) on the region adjacent to each dimension line to extract the
-         numeric value and unit label.
-      3. Compute px_per_unit = pixel_length_of_line / extracted_numeric_value.
-      4. Return Scale(source=ScaleSource.cotas, px_per_unit=..., unit=...).
+    Flow:
+      1. If not enabled or prerequisites absent → Scale(source=none).
+      2. Delegate to scale_ocr.detect_scale_from_ocr(gray, settings).
+         That function is itself exception-safe and degrades gracefully if
+         pytesseract / the tesseract binary is unavailable.
 
-    Decision gate: adding any OCR dependency (pytesseract, easyocr, LLM call)
-    MUST be documented as an ADR before merging, because it changes the
-    container image size and latency profile significantly.
+    Args:
+        gray:     Grayscale image (pre-blur) from the current extract() call,
+                  as stored in OpenCVClassicEngine._gray.  May be None when
+                  called from a unit test that bypasses the full pipeline.
+        settings: Runtime settings.  May be None in lightweight unit tests.
 
     Returns:
-        Scale(source="none", px_per_unit=None, unit=None).  Never raises.
+        Scale.  Never raises.
     """
-    return Scale(source=ScaleSource.none)
+    if gray is None or settings is None:
+        return Scale(source=ScaleSource.none)
+
+    if not settings.cv_scale_ocr_enabled:
+        return Scale(source=ScaleSource.none)
+
+    return detect_scale_from_ocr(gray, settings)
 
 
 # ---------------------------------------------------------------------------
@@ -589,27 +596,42 @@ def _detect_scale() -> Scale:
 
 def _build_closed_wall_mask_for_rooms(
     wall_mask: NDArray[np.uint8],
+    close_h_gap_px: int = _ROOM_CLOSE_GAP_PX,
+    close_v_gap_px: int = _ROOM_CLOSE_GAP_PX,
 ) -> NDArray[np.uint8]:
     """Build a version of the wall mask with architectural openings bridged.
 
-    Applies two directional morphological closes — one horizontal (bridges
-    gaps in the x direction, i.e., in horizontal walls such as the top/bottom
-    perimeter) and one vertical (bridges gaps in the y direction, i.e., in
-    vertical walls such as the left/right perimeter and interior dividers).
-    The kernel size is _ROOM_CLOSE_GAP_PX, large enough to bridge any
-    opening up to _OPENING_MAX_GAP_PX wide.
+    Applies two directional morphological closes with independent kernel sizes:
+
+    - Horizontal close (kernel: close_h_gap_px x 1): bridges openings along the
+      x direction, i.e., gaps in vertical walls (door openings in interior
+      dividers).  The H gap must be *smaller* than the narrowest room width to
+      avoid inadvertently filling narrow rooms (bathrooms, corridors) that are
+      bounded by two parallel vertical walls.
+
+    - Vertical close (kernel: 1 x close_v_gap_px): bridges openings along the
+      y direction, i.e., gaps in horizontal walls (wide sliding doors or
+      passages in the top/bottom perimeter and floor-plate dividers).
+
+    Using asymmetric gaps (H < V) fixes detection of narrow rooms in dense
+    residential plans where bathrooms can be as narrow as ~130 px (≈1.0 m at
+    2000 px) while wide door/passage openings still need a larger V close.
 
     This mask is used EXCLUSIVELY for the CCA room-detection step.  All other
     pipeline steps (wall detection, opening detection) use the original mask.
 
     Args:
         wall_mask: Binary mask where walls = 255.
+        close_h_gap_px: Horizontal close kernel width (px).  Default falls back
+            to _ROOM_CLOSE_GAP_PX for backward compatibility.
+        close_v_gap_px: Vertical close kernel height (px).  Default falls back
+            to _ROOM_CLOSE_GAP_PX for backward compatibility.
 
     Returns:
         Binary mask with openings filled in, suitable for CCA.
     """
-    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (_ROOM_CLOSE_GAP_PX, 1))
-    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, _ROOM_CLOSE_GAP_PX))
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (close_h_gap_px, 1))
+    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, close_v_gap_px))
     closed: NDArray[np.uint8] = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, h_kernel)
     closed = cv2.morphologyEx(closed, cv2.MORPH_CLOSE, v_kernel)
     return closed
@@ -855,7 +877,24 @@ class OpenCVClassicEngine(GeometryEngine):
         # A separate closed mask bridges architectural openings so that CCA
         # sees fully enclosed regions.  Walls and openings detection still
         # use the original (unclosed) wall_mask.
-        closed_wall_mask = _build_closed_wall_mask_for_rooms(wall_mask)
+        # Asymmetric H/V gaps: H is kept smaller than V to avoid filling
+        # narrow rooms (bathrooms, corridors) bounded by two close vertical
+        # walls, while V bridges wide door/passage openings in horizontal walls.
+        _h_gap = (
+            self._settings.cv_room_close_h_gap_px
+            if self._settings is not None
+            else _ROOM_CLOSE_GAP_PX
+        )
+        _v_gap = (
+            self._settings.cv_room_close_v_gap_px
+            if self._settings is not None
+            else _ROOM_CLOSE_GAP_PX
+        )
+        closed_wall_mask = _build_closed_wall_mask_for_rooms(
+            wall_mask,
+            close_h_gap_px=_h_gap,
+            close_v_gap_px=_v_gap,
+        )
         rooms = _detect_rooms(closed_wall_mask, img_h, img_w)
         t_rooms = time.monotonic()
 
@@ -864,7 +903,7 @@ class OpenCVClassicEngine(GeometryEngine):
         t_openings = time.monotonic()
 
         # ---- 9. Derive scale (06-cv-04) --------------------------------
-        scale = _detect_scale()
+        scale = _detect_scale(self._gray, self._settings)
         t_done = time.monotonic()
 
         _engine_logger.info(
