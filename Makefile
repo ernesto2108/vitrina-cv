@@ -1,8 +1,12 @@
-PORT ?= 8000
+PORT      ?= 8000
+IMAGE     ?= vitrina-cv
+TAG       ?= latest
+CONTAINER ?= vitrina-cv
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install run lint format typecheck test
+.PHONY: help install run lint format typecheck test \
+        docker-build docker-stop docker-start docker-redeploy
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -25,3 +29,19 @@ typecheck: ## Run mypy static type checks
 
 test: ## Run test suite with coverage
 	PYTHONPATH=src pytest --cov=src/vitrina_cv --cov-report=term-missing
+
+docker-build: ## Build Docker image (IMAGE/TAG overridable)
+	docker build -t $(IMAGE):$(TAG) .
+
+docker-stop: ## Stop and remove the running container (if any)
+	-docker stop $(CONTAINER) 2>/dev/null
+	-docker rm   $(CONTAINER) 2>/dev/null
+
+docker-start: ## Run the container from the current image
+	docker run -d \
+		--name $(CONTAINER) \
+		-p $(PORT):$(PORT) \
+		-e PORT=$(PORT) \
+		$(IMAGE):$(TAG)
+
+docker-redeploy: docker-build docker-stop docker-start ## Rebuild image, replace container
