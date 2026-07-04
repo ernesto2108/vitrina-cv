@@ -1,0 +1,8 @@
+{
+  "plan_id": "plan-004-sintetico-alta-res",
+  "expected_rooms": 4,
+  "room_areas_m2": [27.87, 21.19, 17.18, 17.18],
+  "expected_doors": 5,
+  "expected_windows": 4,
+  "notes": "Plano sintético generado programáticamente (4460x3260 px, escala exacta 300 px/m) — dataset 100% propio, sin problema de licencia. Casa 12.00 x 8.00 m, muro exterior 0.25 m, tabiques 0.15 m. Ambientes: Sala (27.87), Dorm 1 (21.19), Cocina (17.18), Dorm 2 (17.18) — áreas interiores exactas por construcción. Propósito: verificar OCR de cotas con texto a resolución digna (~40 px) y validar la métrica de área con escala conocida. Generador: scratchpad/gen_plan_004.py (sesión 2026-07-03)."
+}
