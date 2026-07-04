@@ -83,6 +83,15 @@ Servicio de computer vision (Python 3.12+ / FastAPI) que extrae geometría deter
 - Decisiones semánticas sobre tipo de abertura o etiqueta de ambiente (viola ADR-009)
 - Retención de estado entre requests
 
+## Harness de evaluación offline (ADR-012)
+
+- **Directorio:** `eval/` — fuera de `src/vitrina_cv/`; no se empaqueta en el build (hatchling src layout).
+- **Runner:** `eval/run_eval.py` — invocado con `uv run python eval/run_eval.py`.
+- **Dataset:** `eval/dataset/<plan_id>/` — cada directorio contiene `image.png` + `ground_truth.json` (formato canónico en ADR-012 §2).
+- **Dataset inicial:** 3 planos baseline — `plan-001-denso-achurado` (12 rooms esperados, áreas m² anotadas), `plan-002-simple-limpio` (6 rooms, sin escala), `plan-003-reticula-cotas` (16 rooms, sin áreas por ambiente).
+- **Baseline corrida 2026-07-03 (motor opencv):** plan-001 score=0.000 (0/12 rooms), plan-002 score=1.000 (6/6 rooms), plan-003 score=0.625 (10/16 rooms). Score medio=0.542.
+- **Sin dependencias nuevas:** usa stdlib + el paquete instalado. `eval/` no modifica el contrato REST (ADR-003 intacto).
+
 ## Estrategia de migraciones
 
 - **Herramienta:** ninguna — el servicio es stateless sin base de datos

@@ -1,0 +1,8 @@
+{
+  "plan_id": "plan-003-reticula-cotas",
+  "expected_rooms": 16,
+  "room_areas_m2": null,
+  "expected_doors": 14,
+  "expected_windows": 6,
+  "notes": "Plano mexicano con retícula de ejes estructurales. Lote 8.00 x 22.00 m. Ambientes identificados: Terraza, Baño 1, Dormitorio 3, Dormitorio 1, Baño 2, Dormitorio 2, Pasadizo, Cocina, Patio, Lavandería, Dormitorio Servicio, Baño servicio, Comedor, Sala, Hall, Estacionamiento. Cotas lineales presentes pero sin superficies por ambiente — candidato a área via OCR de cotas en el futuro. Retícula de ejes puede generar falsos positivos en detección de muros."
+}

@@ -1,0 +1,8 @@
+{
+  "plan_id": "plan-002-simple-limpio",
+  "expected_rooms": 6,
+  "room_areas_m2": null,
+  "expected_doors": 5,
+  "expected_windows": 4,
+  "notes": "Plano minimalista sin cotas ni escala. Ambientes estimados por conteo visual: dormitorio sup-izq, baño, cocina (abierta a comedor-sala), dormitorio medio-izq, dormitorio inf-izq, hall/corredor. Sin escala ni cotas — métrica de área desactivada."
+}

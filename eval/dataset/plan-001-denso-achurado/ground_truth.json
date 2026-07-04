@@ -1,0 +1,8 @@
+{
+  "plan_id": "plan-001-denso-achurado",
+  "expected_rooms": 12,
+  "room_areas_m2": [10.30, 6.66, 13.18, 5.45, 13.18, 18.65, 9.40, 5.75, 5.11, 11.61, 22.76, 48.55],
+  "expected_doors": 12,
+  "expected_windows": 6,
+  "notes": "Plano español con superficies rotuladas. Cotas generales 20.96 x 11.92 m. Ambientes interiores: Baño Principal (10.30), Vestidor (6.66), Habitación (13.18), Baño (5.45), Dormitorio (13.18), Cocina-Office (18.65), Pasillo (9.40), Recibidor (5.75), Baño (5.11), Habitación (11.61), Dormitorio Principal (22.76), Salón-Comedor (48.55). Porche 27.80 m² es exterior — no contado como room interior."
+}

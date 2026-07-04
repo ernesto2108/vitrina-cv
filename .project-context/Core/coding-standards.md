@@ -202,6 +202,18 @@ Comandos:
 - **Cuándo usar:** en cualquier handler que tenga etapas de procesamiento medibles; el `extra={}` es el patrón de logging estructurado sin dependencias pesadas
 - **Anti-pattern:** concatenar valores en el mensaje del logger (pierde parsabilidad estructurada); medir tiempos con `datetime.now()` en lugar de `time.monotonic()`
 
+### Harness de evaluación offline — eval/run_eval.py (ADR-012)
+- **Archivo:** `eval/run_eval.py`
+- **Qué hace:** runner standalone invocado con `uv run python eval/run_eval.py`; descubre `eval/dataset/<plan_id>/` con `image.png` + `ground_truth.json`, invoca el motor in-process vía `get_engine(settings.cv_engine)` + `engine.extract(image_bytes)`, computa métricas por plano y reporte tabular a stdout. Exit code siempre 0 — herramienta de medición, no gate CI.
+- **Score formula:** `0.5·room_score + 0.5·area_score - fp_penalty` (con área) / `room_score - fp_penalty` (sin área), clamped [0,1]. `fp_penalty = clamp(FP/expected, 0,1)·0.3`. Área solo cuando `scale.source != "none"` Y `room_areas_m2` presente.
+- **Cuándo usar:** al añadir planos al dataset de evaluación o al calibrar el pipeline — correr antes y después de cada cambio de parámetro CV para medir regresiones.
+- **Anti-pattern:** usar HTTP para invocar el motor desde el harness (ADR-008 + ADR-002 lo prohíben); instanciar el motor concreto directamente; incluir `eval/` en el paquete distribuible (hatchling src layout lo excluye por diseño).
+
+### per-file-ignores para eval/ — pyproject.toml
+- **Archivo:** `pyproject.toml`
+- **Qué hace:** `"eval/**" = ["T201"]` — excluye la regla T201 (print) para scripts de tooling en `eval/`; el resto de reglas aplica normalmente.
+- **Cuándo usar:** al agregar nuevos scripts de tooling en `eval/` que requieran `print` para reporting a stdout.
+
 ### TYPE_CHECKING para imports de tipo-only
 - **Archivo:** `src/vitrina_cv/engines/base.py`, `engines/opencv_classic.py`, `preflight/checks.py`
 - **Qué hace:** agrupa imports usados solo en annotations bajo `if TYPE_CHECKING:` — evita circular imports y reduce overhead

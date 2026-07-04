@@ -1,7 +1,7 @@
 # Context Navigator — vitrina-cv
 
 last_full_scan: 2026-07-02
-last_updated: 2026-07-03T18:00:00  # reporter delta: ADR-011 OCR de cotas implementado — scale_ocr.py nuevo, settings CV_SCALE_OCR_*, _detect_scale ya no es stub; pytesseract opcional con degradación elegante; coding-standards, risks y workflows actualizados
+last_updated: 2026-07-03T20:00:00  # reporter delta: ADR-012 harness evaluación offline implementado — eval/run_eval.py + 3 planos dataset; baseline score medio=0.542; coding-standards y project.md actualizados
 coverage: bootstrap
 
 ## Índice
