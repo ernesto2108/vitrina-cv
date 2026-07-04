@@ -1,7 +1,7 @@
 # Context Navigator — vitrina-cv
 
 last_full_scan: 2026-07-02
-last_updated: 2026-07-03T20:00:00  # reporter delta: ADR-012 harness evaluación offline implementado — eval/run_eval.py + 3 planos dataset; baseline score medio=0.542; coding-standards y project.md actualizados
+last_updated: 2026-07-03T23:30:00  # reporter delta: calibración plan-004 — retain_rectilinear condicional + thickness cap; score plan-004 0.000→0.981; sin regresión plan-002/003
 coverage: bootstrap
 
 ## Índice

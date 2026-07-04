@@ -348,8 +348,37 @@ def clean_mask(
         extra={"removed_count": removed_count},
     )
 
-    # Step 2 — diagonal hatching removal via directional morphological open
-    cleaned = retain_rectilinear(cleaned, settings.cv_cleanup_rectilinear_len_px)
+    # Compute resolution scale once — used by steps 2 and 4.
+    # The scale is capped at CV_CLEANUP_RECTILINEAR_MAX_RES_SCALE (default 1.0)
+    # so that native high-resolution images (long side > CV_UPSCALE_TARGET_PX)
+    # are not penalised by over-aggressive thresholds calibrated for ~2000 px.
+    img_h_raw, img_w_raw = cleaned.shape[:2]
+    long_side_raw = max(img_h_raw, img_w_raw)
+    resolution_scale_raw = long_side_raw / max(1, settings.cv_upscale_target_px)
+    resolution_scale = min(
+        resolution_scale_raw, settings.cv_cleanup_rectilinear_max_res_scale
+    )
+
+    # Step 2 — diagonal hatching removal via directional morphological open.
+    # Skipped for native high-resolution images (resolution_scale_raw > max_res_scale)
+    # because the 150 px kernel removes critical junction corner pieces in thick-wall
+    # plans (e.g. 300 px/m synthetic plans), which breaks room-boundary closure
+    # without yielding meaningful hatch-removal benefit (thick-wall plans rarely
+    # use dense diagonal hatching).
+    if resolution_scale_raw <= settings.cv_cleanup_rectilinear_max_res_scale:
+        cleaned = retain_rectilinear(cleaned, settings.cv_cleanup_rectilinear_len_px)
+        _logger.info(
+            "cv_cleanup_step2_rectilinear",
+            extra={"resolution_scale": round(resolution_scale_raw, 3), "applied": True},
+        )
+    else:
+        _logger.info(
+            "cv_cleanup_step2_rectilinear",
+            extra={
+                "resolution_scale": round(resolution_scale_raw, 3),
+                "applied": False,
+            },
+        )
 
     # Step 3 — crop to main component
     # Running crop BEFORE the thin-stroke filter keeps the exterior perimeter
@@ -367,14 +396,11 @@ def clean_mask(
 
     # Step 4 — thin-stroke filter (removes cota lines, furniture, stair lines)
     # The threshold is calibrated at CV_UPSCALE_TARGET_PX (~2000 px long side).
-    # For images larger than the calibration resolution (not upscaled because
-    # their long side already exceeds the target), we scale the threshold
-    # proportionally so that physically identical strokes pass the same test
-    # regardless of image resolution.
+    # The resolution scale used here is capped at CV_CLEANUP_RECTILINEAR_MAX_RES_SCALE
+    # (default 1.0) so the effective thickness does not grow for native high-res
+    # images.  This preserves thin double-line wall notation (≥5 px per strand)
+    # that would be discarded if the threshold scaled past 5 px.
     if settings.cv_cleanup_thickness_filter_enabled:
-        img_h, img_w = cleaned.shape[:2]
-        long_side = max(img_h, img_w)
-        resolution_scale = long_side / max(1, settings.cv_upscale_target_px)
         effective_thickness = max(
             1, round(settings.cv_cleanup_min_wall_thickness_px * resolution_scale)
         )
@@ -388,7 +414,8 @@ def clean_mask(
             extra={
                 "min_wall_thickness_px_setting": settings.cv_cleanup_min_wall_thickness_px,
                 "effective_threshold_px": effective_thickness,
-                "resolution_scale": round(resolution_scale, 3),
+                "resolution_scale_raw": round(resolution_scale_raw, 3),
+                "resolution_scale_capped": round(resolution_scale, 3),
                 "preclose_kernel_px": settings.cv_cleanup_thickness_preclose_px,
             },
         )

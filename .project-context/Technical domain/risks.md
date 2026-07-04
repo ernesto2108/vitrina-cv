@@ -39,11 +39,11 @@ last_updated: 2026-07-02
 | `src/vitrina_cv/mask_cleanup.py` | ~200 | Módulo nuevo; podría integrarse en `preprocessing.py` si crece el nro de módulos auxiliares |
 | `src/vitrina_cv/scale_ocr.py` | ~340 | Módulo OCR (ADR-011); candidato a tests unitarios granulares de `_consistent_median`, `_infer_unit_and_metres`, `_distance_point_to_seg` — actualmente cubiertos solo por integración |
 
-### CV_CLEANUP_RECTILINEAR_LEN_PX — calibración frágil por resolución
+### CV_CLEANUP_RECTILINEAR_LEN_PX — calibración frágil por resolución [MITIGADO 2026-07-03]
 - **Dónde:** `src/vitrina_cv/mask_cleanup.py`, `src/vitrina_cv/config/settings.py`
-- **Descripción:** el valor default L=150 fue calibrado sobre una imagen 1049x2000. A resoluciones distintas (especialmente < 800px de lado corto, o > 2000px sin upscale) el kernel puede ser demasiado largo (elimina muros reales) o demasiado corto (no elimina achurado). El test `test_especial1_celdas_diminutas_filtradas_por_diseno` falló tras introducir el cleanup: comportamiento esperado cambió de rooms=[] a rooms=[1_room].
-- **Workaround:** ajustar via env var `CV_CLEANUP_RECTILINEAR_LEN_PX`; considerar escalar L proporcionalmente al lado mayor de la imagen en una iteración futura.
-- **Test pendiente:** el `tester` debe actualizar `test_especial1_celdas_diminutas_filtradas_por_diseno` para reflejar el nuevo comportamiento esperado con cleanup activo.
+- **Descripción original:** el valor default L=150 fue calibrado sobre una imagen 1049x2000. A resoluciones > 2000px sin upscale, el kernel de 150 px elimina piezas de esquina de junctions tabique-muro (120×31 px en plan-004 a 300 px/m), rompiendo el cierre de habitaciones.
+- **Mitigación aplicada (2026-07-03):** se añadió `CV_CLEANUP_RECTILINEAR_MAX_RES_SCALE=1.0` — `retain_rectilinear` se salta automáticamente para imágenes con `long_side/target > 1.0` (nativas alta-res no upscaleadas). Paralelamente, `CV_CLEANUP_MIN_WALL_THICKNESS_PX` bajó de 6 a 5 y el escalado del umbral de thickness se capea en el mismo factor (1.0) para preservar muros de doble-línea (5 px/strand) en planos de alta resolución.
+- **Riesgo residual:** planos nativos alta-res CON achurado denso (plan-001 style, pero a >2000px) no se beneficiarán del filtrado de achurado. Si ese caso emerge, considerar detección explícita de contenido diagonal para decidir si aplicar retain_rectilinear.
 
 ### TODOs y FIXMEs con impacto
 

@@ -182,6 +182,23 @@ class Settings(BaseSettings):
             "Limitation: genuine diagonal walls are also removed. Default: 150."
         ),
     )
+    cv_cleanup_rectilinear_max_res_scale: float = Field(
+        default=1.0,
+        gt=0.0,
+        description=(
+            "Step 2 — maximum resolution scale at which retain_rectilinear is "
+            "applied.  The scale is computed as long_side / CV_UPSCALE_TARGET_PX. "
+            "When the image resolution scale exceeds this cap (i.e. the image was "
+            "NOT upscaled because it is already high-res), step 2 is skipped. "
+            "Rationale: the rectilinear kernel length (150 px) was calibrated for "
+            "~2000 px images; at native high-resolution it removes valid junction "
+            "corner pieces that are critical for room-boundary closure, and the "
+            "hatch-removal benefit is lower because thick-wall plans rarely use "
+            "dense diagonal hatching. "
+            "Default: 1.0 — skip retain_rectilinear for images with long side "
+            "> CV_UPSCALE_TARGET_PX."
+        ),
+    )
     cv_cleanup_crop_enabled: bool = Field(
         default=True,
         description=(
@@ -215,7 +232,7 @@ class Settings(BaseSettings):
         ),
     )
     cv_cleanup_min_wall_thickness_px: int = Field(
-        default=6,
+        default=5,
         ge=1,
         description=(
             "Step 4 — minimum wall stroke thickness (px) for seed extraction. "
@@ -225,10 +242,11 @@ class Settings(BaseSettings):
             "the full extent of wall strokes from those seeds. Strokes thinner than "
             "this value that are not within reach of a seed (cotas, furniture "
             "outlines, stair lines) are discarded. "
-            "The threshold is automatically scaled proportionally when the image "
-            "long side differs from CV_UPSCALE_TARGET_PX, so the same default "
-            "works for larger images without tuning. "
-            "Calibrated for ~2000 px normalised images. Default: 6."
+            "The resolution scale used for this threshold is capped at "
+            "CV_CLEANUP_RECTILINEAR_MAX_RES_SCALE, so the physical threshold does "
+            "not grow for native high-resolution images. This preserves thin "
+            "double-line wall notation (≥5 px per strand) in high-res plans. "
+            "Calibrated for ~2000 px normalised images. Default: 5 (was 6)."
         ),
     )
     cv_cleanup_thickness_preclose_px: int = Field(

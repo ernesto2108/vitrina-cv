@@ -59,12 +59,11 @@ Servicio de computer vision (Python 3.12+ / FastAPI) que extrae geometría deter
 
 - **Módulo:** `src/vitrina_cv/mask_cleanup.py`
 - **Posición en pipeline:** paso 4b — después de `_build_wall_mask` y ANTES de HoughLinesP / CCA. El preflight NO lo ve.
-- **Pasos:** (1) quitar componentes pequeños en ambas dimensiones (texto), (2) apertura morfológica H+V con kernel L=150 px (mata achurado diagonal, conserva muros H/V), (3) filtro de grosor por componente vía distanceTransform (mata anotaciones/muebles/escaleras aislados), (4) recorte al componente mayor + margen (mata cotas perimetrales). Orden obligatorio: 1 → 2 → 3 → 4.
-- **Settings nuevas (CV_CLEANUP_*):** `CV_CLEANUP_ENABLED`, `CV_CLEANUP_TEXT_MAX_SIDE_PX=40`, `CV_CLEANUP_RECTILINEAR_LEN_PX=150`, `CV_CLEANUP_THICKNESS_FILTER_ENABLED=True`, `CV_CLEANUP_MIN_WALL_THICKNESS_PX=6` (auto-escalado por resolución), `CV_CLEANUP_CROP_ENABLED`, `CV_CLEANUP_CROP_MARGIN_PX=20`.
-- **Calibración L=150:** valor empírico sobre imagen 1049x2000; a resoluciones menores puede necesitar ajuste.
-- **Bug corregido:** docstring de `CV_CLEANUP_RECTILINEAR_LEN_PX` decía "Default: 25" pero el valor real siempre fue 150. Corregido a "Default: 150".
-- **Efecto medido (3 pasos previos):** imagen 2 (470x896→1049x2000): walls 852→118, rooms 0→4. Imagen 1 (2000x2000): rooms 6→6 (sin regresión).
-- **Efecto medido (con paso 3 thickness filter, t=6):** plano_limpio: W 115→80 (-35 muebles aislados), R 6→6 (sin regresión). plano_denso: W 118→111 (-7 aislados), R 4→4 (sin regresión). Limitación: en planos densos donde anotaciones están conectadas al trazo principal el impacto del filtro es menor (el max-dist del componente es alto por los muros exteriores).
+- **Pasos:** (1) quitar componentes pequeños en ambas dimensiones (texto), (2) apertura morfológica H+V con kernel L=150 px — **condicional: solo se aplica cuando `resolution_scale ≤ CV_CLEANUP_RECTILINEAR_MAX_RES_SCALE` (default 1.0)**; omitida para imágenes nativas alta-res que no sufrieron upscale, (3) recorte al componente mayor + margen (mata cotas perimetrales), (4) filtro de grosor por componente vía distanceTransform (mata anotaciones/muebles/escaleras aislados). Orden obligatorio: 1 → 2 → 3 → 4.
+- **Settings (CV_CLEANUP_*):** `CV_CLEANUP_ENABLED`, `CV_CLEANUP_TEXT_MAX_SIDE_PX=40`, `CV_CLEANUP_RECTILINEAR_LEN_PX=150`, `CV_CLEANUP_RECTILINEAR_MAX_RES_SCALE=1.0` (nuevo — cap de res_scale para aplicar paso 2), `CV_CLEANUP_THICKNESS_FILTER_ENABLED=True`, `CV_CLEANUP_MIN_WALL_THICKNESS_PX=5` (default bajó de 6 a 5 para preservar muros doble-línea de 5 px), `CV_CLEANUP_CROP_ENABLED`, `CV_CLEANUP_CROP_MARGIN_PX=20`.
+- **Calibración res_scale cap=1.0:** para planos nativos alta-res (long_side > 2000px, ej. 4460px a 300 px/m), `retain_rectilinear` elimina piezas de esquina en junctions tabique-muro-exterior que son críticas para el cierre de habitaciones — cap en 1.0 las preserva.
+- **Calibración thickness=5:** el paso 4 ahora **no escala hacia arriba** el umbral de grosor para imágenes native-res (res_scale capped at `CV_CLEANUP_RECTILINEAR_MAX_RES_SCALE`). Con umbral=5 px, muros de doble-línea de 5 px/strand sobreviven (max_dist=2.5px ≥ threshold/2=2.5px — borderline pero funcional).
+- **Efecto medido (calibración 2026-07-03, harness ADR-012):** plan-004 alta-res (4460×3260 px, 300 px/m): 0→4/4 rooms, score 0.000→0.981. Sin regresión: plan-002 1.000, plan-003 0.625.
 
 ## Convenciones establecidas
 

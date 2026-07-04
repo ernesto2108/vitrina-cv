@@ -38,7 +38,9 @@ _LIMPIO_EXPECTED_ROOMS = 6
 _LIMPIO_MAX_WALLS = 90
 _DENSO_MIN_ROOMS = 4
 _DENSO_MAX_WALLS = 100
-_DEFAULT_MIN_WALL_THICKNESS_PX = 6
+_DEFAULT_MIN_WALL_THICKNESS_PX = (
+    5  # updated from 6 — preserves 5 px thin walls (double-line notation)
+)
 
 
 def _empty_mask(h: int = 200, w: int = 200) -> NDArray[np.uint8]:
@@ -246,7 +248,7 @@ class TestNewSettings:
         assert s.cv_cleanup_thickness_filter_enabled is True
 
     def test_min_wall_thickness_px_default(self) -> None:
-        """cv_cleanup_min_wall_thickness_px defaults to 6."""
+        """cv_cleanup_min_wall_thickness_px defaults to 5."""
         s = Settings()
         assert s.cv_cleanup_min_wall_thickness_px == _DEFAULT_MIN_WALL_THICKNESS_PX
 
