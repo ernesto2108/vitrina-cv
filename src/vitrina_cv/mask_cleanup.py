@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from vitrina_cv.config.settings import Settings
+    from vitrina_cv.models import Room
 
 _logger = logging.getLogger(__name__)
 
@@ -304,6 +305,103 @@ def crop_to_main_component(
     return out, (x0, y0, x1 - x0, y1 - y0)
 
 
+def filter_interior_components(
+    wall_mask: NDArray[np.uint8],
+    rooms: list[Room],
+    margin_px: float,
+) -> tuple[NDArray[np.uint8], int]:
+    """Remove wall-mask components whose bounding box lies entirely inside a room.
+
+    A connected component is considered a rectilinear furniture artefact when
+    ALL FOUR corners of its bounding box satisfy:
+
+        cv2.pointPolygonTest(room_contour, corner, measureDist=True) > margin_px
+
+    for at least one room polygon.  A positive test value means the corner is
+    inside the polygon; requiring the distance to exceed *margin_px* (≈ wall
+    thickness) ensures that genuine wall segments touching the polygon boundary
+    are NOT removed — their corners land on or close to the polygon edge and
+    fail the distance check.
+
+    Algorithm:
+      1. Run ``cv2.connectedComponentsWithStats`` on *wall_mask*.
+      2. For each component (label ≥ 1), extract its bounding-box corners.
+      3. For each room, test all four corners with ``pointPolygonTest``.
+         If every corner has distance > *margin_px* → mark the component.
+      4. Zero out all marked components in a copy of the mask.
+      5. Log ``interior_components_removed`` with the count and return.
+
+    Args:
+        wall_mask: Binary uint8 mask (walls = 255) from the cleanup pipeline.
+            Must have been produced AFTER steps 1-4 of ``clean_mask``.
+        rooms: Room objects returned by the engine's room-detection step.
+            Each room supplies a ``polygon`` attribute with pixel coordinates.
+        margin_px: Minimum interior distance (px) a bbox corner must have from
+            the room polygon boundary to be considered "fully inside".
+            Corresponds to CV_CLEANUP_INTERIOR_COMPONENTS_MARGIN_PX.
+
+    Returns:
+        ``(filtered_mask, removed_count)`` where *filtered_mask* is a copy of
+        *wall_mask* with furniture components zeroed out, and *removed_count*
+        is the number of components erased.
+    """
+    if not rooms:
+        return wall_mask.copy(), 0
+
+    # Pre-build room contours as (N, 1, 2) int32 arrays for pointPolygonTest.
+    room_contours: list[np.ndarray] = []
+    for room in rooms:
+        pts = np.array(
+            [[round(x), round(y)] for x, y in room.polygon],
+            dtype=np.int32,
+        ).reshape(-1, 1, 2)
+        room_contours.append(pts)
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        wall_mask, connectivity=8
+    )
+
+    to_remove: list[int] = []
+
+    for label in range(1, num_labels):  # label 0 is background
+        bx = int(stats[label, cv2.CC_STAT_LEFT])
+        by = int(stats[label, cv2.CC_STAT_TOP])
+        bw = int(stats[label, cv2.CC_STAT_WIDTH])
+        bh = int(stats[label, cv2.CC_STAT_HEIGHT])
+
+        # Four corners of the bounding box.
+        corners: list[tuple[float, float]] = [
+            (float(bx), float(by)),
+            (float(bx + bw), float(by)),
+            (float(bx), float(by + bh)),
+            (float(bx + bw), float(by + bh)),
+        ]
+
+        for contour in room_contours:
+            # All corners must be strictly inside the polygon by > margin_px.
+            if all(
+                cv2.pointPolygonTest(contour, corner, measureDist=True) > margin_px
+                for corner in corners
+            ):
+                to_remove.append(label)
+                break  # matched one room — no need to check others
+
+    removed_count = len(to_remove)
+    _logger.info(
+        "interior_components_removed",
+        extra={"interior_components_removed": removed_count},
+    )
+
+    if not to_remove:
+        return wall_mask.copy(), 0
+
+    out: NDArray[np.uint8] = wall_mask.copy()
+    for label in to_remove:
+        out[labels == label] = 0
+
+    return out, removed_count
+
+
 def clean_mask(
     mask: NDArray[np.uint8],
     settings: Settings,
@@ -419,5 +517,54 @@ def clean_mask(
                 "preclose_kernel_px": settings.cv_cleanup_thickness_preclose_px,
             },
         )
+
+    return cleaned
+
+
+def clean_mask_steps_1_to_3(
+    mask: NDArray[np.uint8],
+    settings: Settings,
+) -> NDArray[np.uint8]:
+    """Apply cleanup steps 1-3 only (without the thin-stroke filter of step 4).
+
+    This is a companion to ``clean_mask`` that preserves thin strokes — including
+    the double-line window notation that step 4 (``filter_thin_strokes``) removes.
+    Consumers that need to detect window patterns (e.g. ``_detect_window_pattern``
+    in the OpenCV classic engine) should use this function to obtain a mask where
+    window frame lines are still visible.
+
+    Steps applied:
+      1. Remove small components (text / dimension digits / tiny blobs).
+      2. Retain only rectilinear (H/V) structure; kill diagonal hatching.
+      3. Crop to the main floor-plan component (+ margin).
+
+    Step 4 (``filter_thin_strokes``) is intentionally omitted so that thin
+    parallel strokes representing windows survive for downstream pattern matching.
+
+    Args:
+        mask: Binary uint8 wall mask (walls = 255) to partially clean.
+        settings: Application settings carrying cleanup thresholds.
+
+    Returns:
+        Partially cleaned binary uint8 mask (steps 1-3 applied).
+        Thin strokes are preserved; only text, hatching and perimeter cotas
+        have been removed.
+    """
+    if not settings.cv_cleanup_enabled:
+        return mask.copy()
+
+    # Step 1 — text / small-component removal
+    cleaned, _ = remove_small_components(mask, settings.cv_cleanup_text_max_side_px)
+
+    # Step 2 — diagonal hatching removal (conditional on resolution scale cap)
+    img_h_raw, img_w_raw = cleaned.shape[:2]
+    long_side_raw = max(img_h_raw, img_w_raw)
+    resolution_scale_raw = long_side_raw / max(1, settings.cv_upscale_target_px)
+    if resolution_scale_raw <= settings.cv_cleanup_rectilinear_max_res_scale:
+        cleaned = retain_rectilinear(cleaned, settings.cv_cleanup_rectilinear_len_px)
+
+    # Step 3 — crop to main component
+    if settings.cv_cleanup_crop_enabled:
+        cleaned, _ = crop_to_main_component(cleaned, settings.cv_cleanup_crop_margin_px)
 
     return cleaned

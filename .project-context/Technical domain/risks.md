@@ -39,6 +39,13 @@ last_updated: 2026-07-02
 | `src/vitrina_cv/mask_cleanup.py` | ~200 | Módulo nuevo; podría integrarse en `preprocessing.py` si crece el nro de módulos auxiliares |
 | `src/vitrina_cv/scale_ocr.py` | ~340 | Módulo OCR (ADR-011); candidato a tests unitarios granulares de `_consistent_median`, `_infer_unit_and_metres`, `_distance_point_to_seg` — actualmente cubiertos solo por integración |
 
+### cv_room_close_h/v_gap_px no escalan con upscale_factor — gap de diseño [PENDIENTE 2026-07-04]
+- **Dónde:** `src/vitrina_cv/engines/opencv_classic.py` líneas 883-897, `src/vitrina_cv/config/settings.py`
+- **Descripción:** h_gap=80 (calibrado para imágenes en ~2000px) no alcanza a puentear huecos de puertas cuando el plano original es de baja resolución (612px) y se upscalea a 2000px. A ese factor (≈3.27×), una puerta de 0.9m ocupa ~230px en la imagen normalizada pero h_gap=80 solo cierra gaps ≤80px → CCA flood-fill fusiona habitaciones incorrectamente.
+- **Fix parcial aplicado (2026-07-04):** se añadió `cv_room_close_scale_with_upscale` (default **False**). Cuando True, multiplica h_gap y v_gap por el upscale_factor calculado en `normalize_resolution()`. El default es False porque la multiplicación completa (×3.27) colapsa habitaciones en imágenes de 612px como plan-002 (score 1.000→0.333) y plano_limpio.png (6→2 rooms). La raíz del problema es que plan-002 y plan-005 comparten el mismo upscale_factor pero tienen tamaños de habitación distintos — no hay forma de distinguirlos solo por el factor.
+- **Riesgo residual:** plan-005 (612px, muebles) sigue con 1 FP en el eval (score 0.740) — el fix actual no mejora el score del eval. Activar `CV_ROOM_CLOSE_SCALE_WITH_UPSCALE=true` requiere validar que las habitaciones más pequeñas del plano específico no colapsen con el gap escalado.
+- **Próximo paso:** considerar una fórmula más conservadora (e.g., `h_gap * sqrt(upscale_factor)` o un cap máximo) o un parámetro per-plan-type en lugar de un flag global.
+
 ### CV_CLEANUP_RECTILINEAR_LEN_PX — calibración frágil por resolución [MITIGADO 2026-07-03]
 - **Dónde:** `src/vitrina_cv/mask_cleanup.py`, `src/vitrina_cv/config/settings.py`
 - **Descripción original:** el valor default L=150 fue calibrado sobre una imagen 1049x2000. A resoluciones > 2000px sin upscale, el kernel de 150 px elimina piezas de esquina de junctions tabique-muro (120×31 px en plan-004 a 300 px/m), rompiendo el cierre de habitaciones.

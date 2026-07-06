@@ -35,6 +35,16 @@ class ScaleSource(StrEnum):
     none = "none"
 
 
+class StairsDirection(StrEnum):
+    """Cardinal direction of the staircase ascent (ADR-003 extension, OpenAPI v0.2.0)."""
+
+    up_n = "up-N"
+    up_s = "up-S"
+    up_e = "up-E"
+    up_w = "up-W"
+    unknown = "unknown"
+
+
 class OpeningTypeCandidate(StrEnum):
     """Tentative opening type emitted by the CV engine (ADR-009).
 
@@ -97,6 +107,24 @@ class Opening(BaseModel):
     confidence: Annotated[float, Field(ge=0.0, le=1.0)]
 
 
+class StairsCandidate(BaseModel):
+    """A staircase candidate detected in the floor plan (OpenAPI v0.2.0).
+
+    The engine emits a candidate with a directional hint and confidence.
+    Detection logic is deferred to cv-10; this schema unblocks back-06 in
+    parallel.
+
+    OpenAPI required: [bbox, direction, confidence].
+    bbox: [x, y, w, h] in pixels.
+    confidence: [0, 1].
+    """
+
+    # [x, y, w, h] in pixels.  OpenAPI: array[number], minItems=4, maxItems=4.
+    bbox: Annotated[list[float], Field(min_length=4, max_length=4)]
+    direction: StairsDirection
+    confidence: Annotated[float, Field(ge=0.0, le=1.0)]
+
+
 class Scale(BaseModel):
     """Scale derived from dimension annotations in the floor plan.
 
@@ -131,6 +159,7 @@ class Geometry(BaseModel):
     walls: list[Wall]
     rooms: list[Room]
     openings: list[Opening]
+    stairs_candidates: list[StairsCandidate] = []
     scale: Scale
     image_size: ImageSize
 

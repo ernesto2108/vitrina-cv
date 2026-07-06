@@ -30,6 +30,7 @@ last_updated: 2026-07-02
 
 ### extract-geometry
 - **Aberturas como candidatas (ADR-009):** el motor CV no decide el tipo final de una abertura. Emite `type_candidate` tentativo + `confidence`; la clasificación final la hace el LLM en vitrina.
+- **Escaleras como candidatas (07-cv-09):** `StairsCandidate` sigue el mismo patrón que `Opening` — bbox `[x,y,w,h]` en píxeles (exactamente 4 floats), dirección `StairsDirection` (up-N/S/E/W/unknown), `confidence` en [0,1]. El campo `stairs_candidates` en `Geometry` tiene default `[]` para no romper consumidores existentes. La lógica de detección se implementa en cv-10.
 - **Motor intercambiable (ADR-008):** el router lee `CV_ENGINE` y delega a la interfaz `GeometryEngine`; nunca instancia el motor concreto directamente en el handler.
 - **Close asimétrico H/V para detección de habitaciones:** `_build_closed_wall_mask_for_rooms` aplica cierre morfológico con kernels H (`CV_ROOM_CLOSE_H_GAP_PX`, default 80px) y V (`CV_ROOM_CLOSE_V_GAP_PX`, default 160px) independientes. El kernel H debe ser estrictamente menor que el ancho de la habitación más estrecha esperada (baños peruanos típicos ≥ 130px a 2000px). Nunca usar el mismo valor para H y V en planos residenciales densos — un H=160px destruye habitaciones de ~1.0m.
 

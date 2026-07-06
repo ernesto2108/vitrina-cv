@@ -115,7 +115,7 @@ Comandos:
 
 ### Intermedios reutilizables en instancia de engine
 - **Archivo:** `src/vitrina_cv/engines/opencv_classic.py`
-- **Qué hace:** `_wall_mask` y `_gray` en la instancia tras cada `extract()` para que tareas posteriores (06-cv-04) reutilicen la binarización sin repetirla; NO forman parte del contrato `GeometryEngine`
+- **Qué hace:** `_wall_mask`, `_gray`, `_junctions` y `_pre_filter_mask` en la instancia tras cada `extract()` para que tareas posteriores reutilicen intermedios costosos sin repetirlos; NO forman parte del contrato `GeometryEngine`. `_pre_filter_mask` (07-cv-06) = máscara post steps 1-3 de cleanup, pre step 4 — conserva líneas delgadas de ventanas vectoriales.
 - **Cuándo usar:** cuando una task posterior necesite un intermedio costoso del engine; documentar como privado
 - **Anti-pattern:** exponer en la interfaz `GeometryEngine`; acceder desde routers
 
@@ -124,6 +124,14 @@ Comandos:
 - **Qué hace:** agrupa segmentos HoughLinesP por orientación (horizontal/vertical) y coordenada perpendicular usando bins de `_OPENING_COLLINEAR_TOL_PX`; fusiona intervalos solapados con `_merge_intervals`; detecta gaps entre segmentos consecutivos; cada gap dentro de `[_OPENING_MIN_GAP_PX, _OPENING_MAX_GAP_PX]` se emite como `Opening`
 - **Cuándo usar:** al añadir lógica de detección de aberturas; seguir el patrón de constantes nombradas para todos los umbrales (PLR2004)
 - **Anti-pattern:** hardcodear rangos de tamaño de gap; decidir el tipo final de abertura en el engine (viola ADR-009); exponer `_wall_mask` / `_gray` en la interfaz `GeometryEngine`
+
+### Emisión generosa de aberturas con relajación de span junto a junction (07-cv-07) — engines/opencv_classic.py
+- **Archivo:** `src/vitrina_cv/engines/opencv_classic.py`
+- **Qué hace:** `_detect_openings` acepta `junctions`, `arc_centers` y `settings`; para gaps cuyo endpoint está adyacente a una junction de cv-04 usa el umbral relajado `settings.cv_opening_min_wall_span_px` (default 60 px) en lugar del amplio 170 px; la lógica de candidato se delega a `_build_opening_candidate`. Cuando el gap pasa solo por el umbral relajado (flanco < 170 px), la confidence se capea a `_OPENING_RELAXED_SPAN_CONFIDENCE=0.35`. Si hay un arco de puerta (HoughCircles via `_detect_door_arcs`) adyacente al gap, la confidence sube a `_DOOR_ARC_CONFIDENCE=0.7`. El filtrado agresivo queda PROHIBIDO en el engine — se delega al backend (F4, ADR-009).
+- **Settings:** `CV_OPENING_MIN_WALL_SPAN_PX=60` (antes hardcodeado en 170)
+- **Log emitido:** `openings_emitted{door, window, unknown}` con conteos por corrida
+- **Cuándo usar:** al calibrar los umbrales de emisión de aberturas; la función `_build_opening_candidate` es el único punto de cambio para la lógica de span + confidence
+- **Anti-pattern:** filtrar gaps con flanco corto SIN verificar si hay junction adyacente; emitir el tipo definitivo con alta confidence sin evidencia de arco; no loguear conteos por tipo
 
 ### _classify_gap — heurística conservadora de tipo de abertura — engines/opencv_classic.py
 - **Archivo:** `src/vitrina_cv/engines/opencv_classic.py`
@@ -145,15 +153,36 @@ Comandos:
 
 ### _build_closed_wall_mask_for_rooms — cierre morfológico para CCA — engines/opencv_classic.py
 - **Archivo:** `src/vitrina_cv/engines/opencv_classic.py`
-- **Qué hace:** aplica dos cierres morfológicos direccionales (kernel horizontal 160×1 + vertical 1×160) sobre la máscara de paredes para puentear aberturas arquitectónicas antes del CCA; resuelve rooms=0 cuando el plano tiene puertas/ventanas en el perímetro; usada SOLO en el paso de detección de rooms
+- **Qué hace:** aplica dos cierres morfológicos direccionales (kernel horizontal h_gap×1 + vertical 1×v_gap) sobre la máscara de paredes para puentear aberturas arquitectónicas antes del CCA; resuelve rooms=0 cuando el plano tiene puertas/ventanas en el perímetro; usada SOLO en el paso de detección de rooms. Desde 2026-07-04, los gaps se pueden escalar automáticamente por el upscale_factor via `cv_room_close_scale_with_upscale` (default False — opt-in).
 - **Cuándo usar:** siempre que la máscara de paredes llegue a `_detect_rooms`; no pasar al resto del pipeline
-- **Anti-pattern:** usar la máscara cerrada para detección de paredes u aberturas — distorsiona los segmentos Hough y los gaps
+- **Anti-pattern:** usar la máscara cerrada para detección de paredes u aberturas — distorsiona los segmentos Hough y los gaps; activar `scale_with_upscale` sin verificar que las habitaciones más pequeñas del plano no colapsen con el gap escalado
 
-### _consolidate_walls — fusión colineal de segmentos Hough — engines/opencv_classic.py
+### _consolidate_walls — fusión colineal de segmentos Hough con centerline (07-cv-03) — engines/opencv_classic.py
 - **Archivo:** `src/vitrina_cv/engines/opencv_classic.py`
-- **Qué hace:** agrupa los segmentos raw de HoughLinesP por orientación y bin colineal, fusiona intervalos solapados (misma lógica que `_detect_openings`), emite un Wall por run continuo; reduce ~131 segmentos raw a ~16-25 por plano simple
-- **Cuándo usar:** inmediatamente después de `_detect_walls`; los walls consolidados son el output de `Geometry.walls` y el input de `_detect_openings`
-- **Anti-pattern:** pasar walls raw a `_detect_openings` sin consolidar — provoca buckets inconsistentes y falsos gaps en paredes perimetrales
+- **Qué hace:** dos modos según `cv_wall_centerline_enabled` (default `True`).
+  - **Centerline (on):** calcula `distanceTransform` sobre la wall_mask limpiada, estima `thickness = 2 x median(DT samples)` por segmento, agrupa trazos paralelos cuya separación perpendicular ≤ grosor estimado, posiciona el Wall resultante en el centroide y emite `Wall.thickness` en píxeles. Firma actualizada: `_consolidate_walls(walls, wall_mask, settings)`.
+  - **Legacy (off):** bin fijo de `_OPENING_COLLINEAR_TOL_PX=8px`; `Wall.thickness=None`. Comportamiento idéntico al pre-07-cv-03.
+  - Helpers: `_sample_dt_along_segment`, `_estimate_global_wall_thickness_px`, `_group_indices_by_proximity`, `_thickness_from_dt_samples`, `_merge_segs_into_walls`, `_legacy_bin_consolidate`, `_centerline_dt_consolidate`.
+- **Cuándo usar:** inmediatamente después de `_detect_walls`; los walls consolidados son el output de `Geometry.walls` y el input de `_detect_openings`.
+- **Logs emitidos:** `walls_before_consolidation` y `walls_after_consolidation` con `walls_count`.
+- **Anti-pattern:** pasar walls raw a `_detect_openings` sin consolidar; emitir `Wall.thickness` en metros (el consumidor Go lo convierte con `thickness_px * metersPerPx`; emitir metros causa doble conversión).
+
+### _snap_walls_orthogonal + _fuse_junctions — snapping H/V y fusión de junctions (07-cv-04) — engines/opencv_classic.py
+- **Archivo:** `src/vitrina_cv/engines/opencv_classic.py`
+- **Cuándo en el pipeline:** paso 6b de `extract()`, inmediatamente después de `_consolidate_walls` y antes de la detección de rooms.
+- **_snap_walls_orthogonal:** para cada `Wall`, calcula el ángulo del segmento. Si `|angle| < _SNAP_ANGLE_TOL_DEG=5°` → fuerza horizontal (`start.y = end.y = mean(y1,y2)`). Si `|90° - angle| < 5°` → fuerza vertical (`start.x = end.x = mean(x1,x2)`). Si > 5° del eje más cercano → wall intacto (diagonal legítimo).
+- **_fuse_junctions:** para cada par de endpoints de muros distintos, si la distancia euclídea < `min(t_i, t_j)` (fallback `_WALL_THICKNESS_EST_PX=10` cuando `thickness=None`), fusiona ambos al centroide del cluster vía Union-Find. Retorna `(walls_actualizados, junctions: list[Point])`.
+- **_junctions en el engine:** almacenados como `OpenCVClassicEngine._junctions: list[Point] | None` para consumo por cv-07 (detección de puertas en esquina). Patrón de intermedio reutilizable ya establecido con `_wall_mask` y `_gray`.
+- **Constantes:** `_SNAP_ANGLE_TOL_DEG=5.0`, `_JUNCTION_MIN_CLUSTER_SIZE=2`.
+- **Anti-pattern:** llamar antes de `_consolidate_walls` (las junctions deben operar sobre walls ya en centerline, no sobre los fragmentos Hough); exponer `_junctions` en la interfaz `GeometryEngine` o en el contrato REST (viola ADR-003).
+
+### _detect_window_pattern — detección de ventanas por doble línea (07-cv-06) — engines/opencv_classic.py
+- **Archivo:** `src/vitrina_cv/engines/opencv_classic.py`
+- **Qué hace:** detecta ventanas vectoriales como patrón de 2 líneas paralelas DENTRO del span del muro, sobre la máscara pre-filtro (`_pre_filter_mask`). Para cada muro H/V: muestrea perfiles perpendiculares cada `_WIN_PROFILE_STEP_PX=8px`; cuenta runs de foreground; spans con `_WIN_EXPECTED_RUNS=2` runs en `>= _WIN_MIN_CONSECUTIVE_PROFILES=3` posiciones consecutivas emiten `Opening(type_candidate=window, confidence=0.35)`.
+- **Cuándo usar:** llamar en `extract()` después de `_detect_openings`, antes del NMS; combinar ambas listas: `_nms_openings(gap_openings + window_openings)`.
+- **Constantes:** `_WIN_PROFILE_STEP_PX=8`, `_WIN_PROFILE_HALF_EXTRA_PX=3`, `_WIN_MIN_CONSECUTIVE_PROFILES=3`, `_WIN_MAX_SPAN_PX=300`, `_WIN_EXPECTED_RUNS=2`, `_WIN_CONFIDENCE=0.35`.
+- **Helpers internos:** `_build_window_flags` (muestreo), `_scan_window_runs` (scan de runs), `_maybe_emit_window` (validación span + construcción Opening), `_count_foreground_runs` (cuenta runs 1D).
+- **Anti-pattern:** llamar con la máscara limpiada completa (`_wall_mask`) — el step 4 destruye las líneas delgadas de ventana; pasar muros diagonales (la función los saltea por diseño).
 
 ### _nms_openings — NMS por distancia de centros — engines/opencv_classic.py
 - **Archivo:** `src/vitrina_cv/engines/opencv_classic.py`
@@ -168,6 +197,12 @@ Comandos:
 - **Thresholds en Settings:** `CV_CLEANUP_TEXT_MAX_SIDE_PX=40`, `CV_CLEANUP_RECTILINEAR_LEN_PX=150`, `CV_CLEANUP_CROP_ENABLED=True`, `CV_CLEANUP_CROP_MARGIN_PX=20`, `CV_CLEANUP_THICKNESS_FILTER_ENABLED=True`, `CV_CLEANUP_MIN_WALL_THICKNESS_PX=6` (calibrado para 2000 px; auto-escalado), `CV_CLEANUP_THICKNESS_PRECLOSE_PX=9`.
 - **Orden obligatorio: 1 → 2 → 3(crop) → 4(filter).** Crop antes del filtro mantiene el perímetro exterior conectado; si se invierte el orden, el filtro fragmenta el perímetro y crop selecciona solo un stub de pared.
 - **Anti-pattern:** aplicar el cleanup antes del upscale; pasar la máscara limpiada al preflight (ADR-005); invertir el orden de crop y filter; hardcodear thresholds fuera de Settings.
+
+### clean_mask_steps_1_to_3 — máscara pre-filtro para detección de ventanas — mask_cleanup.py (07-cv-06)
+- **Archivo:** `src/vitrina_cv/mask_cleanup.py`
+- **Qué hace:** variante de `clean_mask` que ejecuta solo los pasos 1-3 (text removal, rectilinear, crop) sin el `filter_thin_strokes` de paso 4. Preserva líneas delgadas de doble trazo (ventanas vectoriales) que el paso 4 destruiría. Devuelve un `NDArray` (misma signatura que `clean_mask`, sin romper callers existentes).
+- **Cuándo usar:** en `OpenCVClassicEngine.extract()` paso 4b para producir `self._pre_filter_mask`; pasar esa máscara a `_detect_window_pattern`. NO usar para el pipeline principal de walls/rooms (usarlos requiere la máscara completa con step 4).
+- **Anti-pattern:** sustituir `clean_mask` por esta función en el pipeline principal — los trazos delgados de cotas/muebles contaminarían Hough y CCA.
 
 ### filter_thin_strokes — filtro geodésico por grosor de trazo — mask_cleanup.py
 - **Archivo:** `src/vitrina_cv/mask_cleanup.py`
@@ -213,6 +248,15 @@ Comandos:
 - **Archivo:** `pyproject.toml`
 - **Qué hace:** `"eval/**" = ["T201"]` — excluye la regla T201 (print) para scripts de tooling en `eval/`; el resto de reglas aplica normalmente.
 - **Cuándo usar:** al agregar nuevos scripts de tooling en `eval/` que requieran `print` para reporting a stdout.
+
+### _detect_stairs_candidates — detección de escaleras por patrón de líneas paralelas (07-cv-10) — engines/opencv_classic.py
+- **Archivo:** `src/vitrina_cv/engines/opencv_classic.py`
+- **Qué hace:** detecta escaleras en la máscara pre-filtro (`_pre_filter_mask`, antes de `filter_thin_strokes`) usando HoughLinesP con umbrales bajos para líneas delgadas de peldaño. Agrupa por orientación (H/V) y coordenada perpendicular, valida ≥4 líneas equiespaciadas (espaciado 20-40px, varianza relativa ≤ 20 %) y verifica que el bbox del patrón esté contenido en un room polygon via `cv2.pointPolygonTest`.
+- **Helpers internos:** `_bbox_inside_any_room`, `_find_equispaced_runs`, `_merge_tread_slots`, `_stairs_runs_to_candidates`, `_candidates_from_orientation`.
+- **Flag:** `CV_STAIRS_DETECTION_ENABLED` (default True) en `settings.py` — con flag off devuelve `[]` sin alterar el pipeline.
+- **Log emitido:** `stairs_candidates_count` con el conteo por corrida.
+- **Cuándo usar:** al ajustar umbrales de detección de escaleras; la función es el único punto de cambio. Llamar DESPUÉS de la detección de rooms (necesita los polígonos), ANTES de escala.
+- **Anti-pattern:** usar `_wall_mask` (post `filter_thin_strokes`) para stair detection — los peldaños habrán sido eliminados; llamar sin rooms disponibles (el anti-FP fallaría sin polígonos).
 
 ### TYPE_CHECKING para imports de tipo-only
 - **Archivo:** `src/vitrina_cv/engines/base.py`, `engines/opencv_classic.py`, `preflight/checks.py`

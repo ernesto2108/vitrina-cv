@@ -39,6 +39,14 @@ Defaults:
                                                   for larger images based on CV_UPSCALE_TARGET_PX)
   CV_CLEANUP_THICKNESS_PRECLOSE_PX     = 9       (step 4: pre-close kernel size (px) used to bridge
                                                   double-wall gaps before computing distance seeds)
+  CV_CLEANUP_INTERIOR_COMPONENTS_ENABLED = true  (step 5: remove wall-mask components whose bbox is
+                                                  entirely inside a detected room polygon. Eliminates
+                                                  rectilinear furniture (tables, sofas) missed by steps
+                                                  1-4. Set false to skip without regression.)
+  CV_CLEANUP_INTERIOR_COMPONENTS_MARGIN_PX = 10  (step 5: pointPolygonTest distance threshold (px).
+                                                  Corners must be > this value inside the polygon to
+                                                  trigger removal. Prevents wall segments touching the
+                                                  polygon edge from being deleted.)
 
   Room detection (directional close before CCA):
   CV_ROOM_CLOSE_H_GAP_PX          = 80          (horizontal morphological close gap (px). Bridges
@@ -50,6 +58,16 @@ Defaults:
                                                   openings aligned with horizontal walls (e.g. wide
                                                   sliding doors or passages). Default: 160 ≈ 1.2 m
                                                   at 2000 px.)
+
+  Opening detection (gap-based — used in _detect_openings):
+  CV_OPENING_MIN_WALL_SPAN_PX     = 60           (relaxed wall-span threshold (px) applied when a
+                                                  gap endpoint is adjacent to a wall junction from
+                                                  cv-04 _fuse_junctions.  Corner-adjacent doors have
+                                                  short flanking segments on one side; the wide span
+                                                  (170 px module constant) would discard them.  Fine
+                                                  filtering is delegated to the backend (F4).
+                                                  Default: 60 (≈0.4 m at 2000 px).  Previous hard-
+                                                  coded value: 170.)
 
   Scale OCR (ADR-011 — pytesseract + tesseract binary, optional):
   CV_SCALE_OCR_ENABLED            = true         (master switch for OCR-based scale detection.
@@ -65,6 +83,11 @@ Defaults:
                                                   binary. Empty string means auto-detect via PATH.
                                                   Example: "/opt/homebrew/bin/tesseract".
                                                   Default: "" (auto).)
+
+  Staircase detection (07-cv-10 — uses pre-filter mask before filter_thin_strokes):
+  CV_STAIRS_DETECTION_ENABLED     = true         (master switch. When false,
+                                                  stairs_candidates=[] and the pipeline
+                                                  is identical to the pre-07-cv-10 behaviour.)
 
   PORT                            = 8000
 """
@@ -269,6 +292,35 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Interior component filter (removes furniture/fixtures inside rooms) ---
+    cv_cleanup_interior_components_enabled: bool = Field(
+        default=True,
+        description=(
+            "Step 5 — interior-component filter. "
+            "After room polygons are detected, runs CCA on the wall mask and "
+            "removes any connected component whose bounding-box corners are ALL "
+            "strictly inside a room polygon by more than "
+            "CV_CLEANUP_INTERIOR_COMPONENTS_MARGIN_PX pixels. "
+            "This eliminates rectilinear furniture (tables, sofas) that survive "
+            "steps 1-4 because they are thick and have long H/V runs. "
+            "Set to False to bypass without affecting steps 1-4. Default: True."
+        ),
+    )
+    cv_cleanup_interior_components_margin_px: int = Field(
+        default=10,
+        ge=0,
+        description=(
+            "Step 5 — margin (px) used when testing whether a component's "
+            "bounding-box corners lie inside a room polygon. "
+            "A corner is considered 'inside' only when "
+            "cv2.pointPolygonTest returns a distance strictly greater than this "
+            "value. Using a positive margin (~wall thickness) ensures that wall "
+            "segments that touch the room boundary are NOT removed (their corners "
+            "fall on or near the polygon edge and fail the test). "
+            "Default: 10 px (≈ half a wall stroke at 2000 px normalised images)."
+        ),
+    )
+
     # --- Room detection (directional close before CCA) ---
     cv_room_close_h_gap_px: int = Field(
         default=80,
@@ -289,6 +341,52 @@ class Settings(BaseSettings):
             "Bridges openings in horizontal walls (e.g. wide sliding doors "
             "or passages). "
             "Calibrated for ~2000 px normalised images. Default: 160 (≈1.2 m)."
+        ),
+    )
+    cv_room_close_scale_with_upscale: bool = Field(
+        default=False,
+        description=(
+            "When True, cv_room_close_h_gap_px and cv_room_close_v_gap_px are "
+            "multiplied by the upscale_factor applied in normalize_resolution(). "
+            "This scales door-gap bridging proportionally when a low-res plan is "
+            "upscaled to CV_UPSCALE_TARGET_PX, ensuring wide openings are closed. "
+            "Default is False (safe, no behaviour change) because the full "
+            "upscale_factor multiplication is too aggressive for most test fixtures "
+            "and eval plans that share the same source resolution (e.g. 612 px). "
+            "Enable explicitly for plans where h_gap=80 provably fails to bridge "
+            "door openings at the normalised resolution."
+        ),
+    )
+
+    # --- Opening detection (07-cv-07) ---
+    cv_opening_min_wall_span_px: int = Field(
+        default=60,
+        gt=0,
+        description=(
+            "Relaxed wall-span threshold (px) applied when a gap endpoint is "
+            "adjacent to a wall junction produced by _fuse_junctions (cv-04). "
+            "Corner-adjacent doors have a short flanking segment on one side; "
+            "the wide span constant (170 px) would silently discard them. "
+            "When no junction is nearby, the 170 px constant still applies so "
+            "mid-wall artefact gaps are not affected by this setting. "
+            "Fine filtering is delegated to the Go backend (F4, ADR-009). "
+            "Default: 60 (≈0.4 m at 2000 px).  Previous hard-coded value: 170."
+        ),
+    )
+
+    # --- Wall centerline (07-cv-03) ---
+    cv_wall_centerline_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True, _consolidate_walls estimates wall thickness via "
+            "distanceTransform and collapses parallel HoughLinesP traces of thick "
+            "walls into a single centerline Wall with thickness > 0 (px). "
+            "Two segments are merged when their perpendicular separation is <= the "
+            "estimated wall thickness (instead of the fixed 8-px bin used when False). "
+            "The output Wall.thickness is 2 x median(DT samples along the segment), "
+            "in pixels — the consumer multiplies by metersPerPx to get metres. "
+            "Set to False to restore the legacy fixed-bin behaviour exactly. "
+            "Default: True."
         ),
     )
 
@@ -320,6 +418,19 @@ class Settings(BaseSettings):
             "Optional override for the path to the tesseract binary. "
             "Empty string = auto-detect via PATH. "
             "Example: '/opt/homebrew/bin/tesseract'. Default: '' (auto)."
+        ),
+    )
+
+    # --- Staircase detection (07-cv-10) ---
+    cv_stairs_detection_enabled: bool = Field(
+        default=True,
+        description=(
+            "Master switch for staircase detection (07-cv-10). "
+            "When True, _detect_stairs_candidates runs on the pre-filter mask "
+            "(before filter_thin_strokes) and emits StairsCandidate objects for "
+            "regions with ≥4 parallel equi-spaced tread lines contained within a "
+            "room polygon. When False, stairs_candidates=[] and the extraction "
+            "pipeline is unchanged from the pre-07-cv-10 behaviour. Default: True."
         ),
     )
 

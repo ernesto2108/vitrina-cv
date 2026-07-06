@@ -35,21 +35,29 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections import defaultdict
 from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
 
 from vitrina_cv.engines.base import GeometryEngine
-from vitrina_cv.mask_cleanup import clean_mask
+from vitrina_cv.mask_cleanup import (
+    clean_mask,
+    clean_mask_steps_1_to_3,
+    filter_interior_components,
+)
 from vitrina_cv.models import (
     Geometry,
     ImageSize,
     Opening,
     OpeningTypeCandidate,
+    Point,
     Room,
     Scale,
     ScaleSource,
+    StairsCandidate,
+    StairsDirection,
     Wall,
 )
 from vitrina_cv.preprocessing import normalize_resolution
@@ -153,6 +161,29 @@ _DOOR_CONFIDENCE: float = 0.5
 _WINDOW_CONFIDENCE: float = 0.4
 _UNKNOWN_CONFIDENCE: float = 0.3
 
+# ---------------------------------------------------------------------------
+# Opening detection tuning constants (07-cv-07) — generous emission
+# ---------------------------------------------------------------------------
+
+# Relaxed wall-span threshold (px) used when a gap endpoint is adjacent to a
+# wall junction.  Corner-adjacent doors have a short flanking segment on one
+# side; the wide 170 px span would silently discard them.  Overridable via
+# Settings.cv_opening_min_wall_span_px (default 60).
+_OPENING_MIN_WALL_SPAN_JUNCTION_PX: int = 60
+
+# Perpendicular tolerance (px) when checking if a junction is on the same
+# wall line as a gap endpoint (~3x _OPENING_COLLINEAR_TOL_PX bin width).
+_JUNCTION_GAP_PERP_TOL_PX: float = 24.0
+
+# Confidence cap applied when a gap passes ONLY via the relaxed junction span
+# (i.e., one flanking segment is shorter than the wide 170 px threshold).
+# Signals weaker geometric evidence; backend (F4) applies stricter filtering.
+_OPENING_RELAXED_SPAN_CONFIDENCE: float = 0.35
+
+# Confidence override when a door-swing arc (semicircle) is detected adjacent
+# to a gap.  Arc presence is strong positive evidence of a door opening.
+_DOOR_ARC_CONFIDENCE: float = 0.7
+
 # Estimated wall thickness (px) used to size the opening bbox perpendicular
 # to the gap direction.  A constant avoids dependency on the wall-mask width.
 _WALL_THICKNESS_EST_PX: int = 10
@@ -171,6 +202,98 @@ _ROOM_CLOSE_GAP_PX: int = _OPENING_MAX_GAP_PX + 10  # 160 px — bridges all ope
 # direction.  20 px suppresses these duplicates while keeping genuinely
 # separate openings (typical inter-opening distance >> 20 px).
 _NMS_CENTER_DIST_PX: float = 20.0
+
+# ---------------------------------------------------------------------------
+# Window pattern detection constants (07-cv-06)
+# ---------------------------------------------------------------------------
+
+# Sampling pitch along the wall axis (px) when profiling perpendicular sections.
+_WIN_PROFILE_STEP_PX: int = 8
+
+# Extra pixels scanned beyond the wall half-thickness on each side of the
+# centerline.  Provides tolerance for small misalignments in the centerline
+# estimate without extending too far into adjacent walls.
+_WIN_PROFILE_HALF_EXTRA_PX: int = 3
+
+# Minimum number of consecutive sampling positions that must all show the
+# double-line pattern (2 foreground runs) to be considered a real window span.
+# 3 positions x 8 px/step = 24 px minimum span at the sampling resolution.
+_WIN_MIN_CONSECUTIVE_PROFILES: int = 3
+
+# Maximum window span (px) along the wall axis.  Candidates longer than this
+# are likely full wall sections whose double notation was mis-classified.
+_WIN_MAX_SPAN_PX: int = 300
+
+# Expected number of foreground runs in a window profile (two parallel frame
+# lines).  Named constant to satisfy PLR2004.
+_WIN_EXPECTED_RUNS: int = 2
+
+# Confidence assigned to window candidates detected by the pattern algorithm.
+# Lower than gap-based window (0.4) because this method is more indirect
+# and depends on the pre-filter mask quality (ADR-009: CV never decides type).
+_WIN_CONFIDENCE: float = 0.35
+
+
+# ---------------------------------------------------------------------------
+# Staircase detection constants (07-cv-10)
+# ---------------------------------------------------------------------------
+
+# HoughLinesP parameters tuned for thin stair-tread lines.
+# Lower threshold and shorter minLineLength than wall detection to pick up
+# the narrow tread strokes that filter_thin_strokes removes from the main mask.
+_STAIRS_HOUGH_THRESHOLD: int = 20
+_STAIRS_HOUGH_MIN_LINE_PX: int = 20
+_STAIRS_HOUGH_MAX_GAP_PX: int = 5
+
+# Bin width (px) used to group nearly-collinear tread segments into a single
+# tread line.  Two segments whose perpendicular coordinate falls within the
+# same bin are considered part of the same tread.
+_STAIRS_COLLINEAR_BIN_PX: int = 5
+
+# Minimum number of parallel equi-spaced tread lines required to emit a
+# staircase candidate.  Fewer than 4 treads are too ambiguous (grid hatching,
+# ventilation grills, etc.).
+_STAIRS_MIN_LINES: int = 4
+
+# Allowed inter-tread spacing range (px) at ~2 000 px normalised resolution.
+# 20 px ≈ 15 cm tread at ~130 px/m; 40 px ≈ 30 cm tread.
+_STAIRS_MIN_SPACING_PX: float = 20.0
+_STAIRS_MAX_SPACING_PX: float = 40.0
+
+# Maximum relative standard deviation of spacings to consider them regular.
+# 0.20 = 20 % tolerance.
+_STAIRS_SPACING_MAX_REL_STD: float = 0.20
+
+# Confidence assigned to staircase candidates detected by this algorithm.
+_STAIRS_CONFIDENCE: float = 0.6
+
+# ---------------------------------------------------------------------------
+# Wall centerline tuning constants (07-cv-03)
+# ---------------------------------------------------------------------------
+
+# Sampling step (px) used when reading distanceTransform values along a Hough
+# segment.  5 px gives ~200 samples on a 1000 px wall — sufficient for a
+# stable median while avoiding per-pixel overhead.
+_DT_SAMPLE_STEP_PX: int = 5
+
+# Minimum perpendicular grouping tolerance (px) when the estimated wall
+# thickness is unusually small (e.g. very thin plans or short noise segments).
+# Prevents degenerate grouping where no two segments ever merge.
+_CENTERLINE_MIN_TOL_PX: float = float(_OPENING_COLLINEAR_TOL_PX)
+
+
+# ---------------------------------------------------------------------------
+# Orthogonal snapping and junction fusion tuning constants (07-cv-04)
+# ---------------------------------------------------------------------------
+
+# Maximum deviation from horizontal (0°) or vertical (90°) for a segment to
+# be snapped to the exact axis.  Segments more than this many degrees from
+# either axis are left untouched (legitimate diagonals).
+_SNAP_ANGLE_TOL_DEG: float = 5.0
+
+# Minimum number of endpoint indices in a Union-Find cluster to constitute a
+# real junction (a singleton endpoint needs no fusion).
+_JUNCTION_MIN_CLUSTER_SIZE: int = 2
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +516,106 @@ def _merge_intervals(
     return merged
 
 
+def _gap_near_junction(
+    gap_start: float,
+    gap_end: float,
+    wall_perp_pos: float,
+    junctions: list[Point],
+    is_horizontal: bool,
+) -> bool:
+    """Return True if either endpoint of a gap is within range of a junction.
+
+    A gap is considered "near a junction" when any fused endpoint from
+    _fuse_junctions satisfies:
+      - perpendicular distance to the wall line < _JUNCTION_GAP_PERP_TOL_PX
+      - primary-axis distance to gap_start OR gap_end < _OPENING_MIN_WALL_SPAN_PX
+
+    The primary-axis window matches the wide span used as the main filter: if
+    a junction falls within that distance of a gap endpoint the short flanking
+    segment is most likely caused by the corner, not by noise.
+
+    Args:
+        gap_start: Gap start coordinate along the primary axis.
+        gap_end: Gap end coordinate along the primary axis.
+        wall_perp_pos: Perpendicular coordinate of the wall line.
+        junctions: Junction points from _fuse_junctions.
+        is_horizontal: True for horizontal walls (primary = x, perp = y).
+
+    Returns:
+        True when a qualifying junction is found near either gap endpoint.
+    """
+    primary_search_px = float(_OPENING_MIN_WALL_SPAN_PX)
+    for jx, jy in junctions:
+        j_perp = jy if is_horizontal else jx
+        j_primary = jx if is_horizontal else jy
+        if abs(j_perp - wall_perp_pos) > _JUNCTION_GAP_PERP_TOL_PX:
+            continue
+        if (
+            abs(j_primary - gap_start) < primary_search_px
+            or abs(j_primary - gap_end) < primary_search_px
+        ):
+            return True
+    return False
+
+
+def _arc_near_gap(
+    gap_cx: float,
+    gap_cy: float,
+    arc_centers: list[tuple[float, float]],
+    proximity_px: float,
+) -> bool:
+    """Return True if any detected arc centre is within *proximity_px* of the gap centre.
+
+    Args:
+        gap_cx: Gap centre x coordinate.
+        gap_cy: Gap centre y coordinate.
+        arc_centers: List of (cx, cy) from _detect_door_arcs.
+        proximity_px: Maximum Euclidean distance to the gap centre.
+
+    Returns:
+        True when at least one arc is within range.
+    """
+    for ax, ay in arc_centers:
+        if math.hypot(ax - gap_cx, ay - gap_cy) < proximity_px:
+            return True
+    return False
+
+
+def _detect_door_arcs(
+    gray: NDArray[np.uint8],
+) -> list[tuple[float, float]]:
+    """Detect door-swing arcs (semicircles) in the grayscale image.
+
+    Uses HoughCircles to find circular arcs whose radius falls in the door-gap
+    range.  The returned centres can be used to boost confidence for gap
+    candidates found near them (07-cv-07 criterion b).
+
+    Intentionally permissive parameters (low param2 accumulator threshold)
+    to avoid missing genuine door arcs; false positives are tolerated because
+    the backend (F4) performs the final spatial validation.
+
+    Args:
+        gray: Grayscale image (pre-blur recommended for edge stability).
+
+    Returns:
+        List of (cx, cy) centre coordinates for detected arcs.  Empty when
+        HoughCircles finds no candidates or the call fails.
+    """
+    circles = cv2.HoughCircles(
+        gray,
+        cv2.HOUGH_GRADIENT,
+        dp=1,
+        minDist=float(_DOOR_GAP_MIN_PX),
+        param1=50.0,
+        param2=25.0,
+        minRadius=_DOOR_GAP_MIN_PX // 2,
+        maxRadius=_DOOR_GAP_MAX_PX // 2,
+    )
+    if circles is None:
+        return []
+    return [(float(c[0]), float(c[1])) for c in circles[0].tolist()]
+
+
 def _classify_gap(
     gap_size: float,
 ) -> tuple[OpeningTypeCandidate, float]:
@@ -423,7 +646,82 @@ def _classify_gap(
     return OpeningTypeCandidate.unknown, _UNKNOWN_CONFIDENCE
 
 
-def _detect_openings(walls: list[Wall]) -> list[Opening]:
+def _build_opening_candidate(
+    gap_start: float,
+    gap_size: float,
+    perp_pos: float,
+    left_span: float,
+    right_span: float,
+    is_horizontal: bool,
+    relaxed_span_px: int,
+    active_junctions: list[Point],
+    arc_centers: list[tuple[float, float]] | None,
+    half_thick: float,
+) -> Opening | None:
+    """Build an Opening candidate for a gap, or return None if it should be skipped.
+
+    Encapsulates all span-threshold, junction-proximity, arc-confidence, and
+    Opening-construction logic so that the outer loops in _detect_openings stay
+    below the PLR branch/statement limits.
+
+    Args:
+        gap_start: Start of the gap along the primary axis.
+        gap_size: Width/height of the gap in pixels.
+        perp_pos: Perpendicular coordinate of the wall line.
+        left_span: Length of the merged wall interval to the left/above the gap.
+        right_span: Length of the merged wall interval to the right/below the gap.
+        is_horizontal: True for horizontal walls (primary = x, perp = y).
+        relaxed_span_px: Span threshold for junction-adjacent gaps.
+        active_junctions: Junction points for proximity check.
+        arc_centers: Arc centre coordinates for confidence boosting.
+        half_thick: Half of _WALL_THICKNESS_EST_PX for bbox construction.
+
+    Returns:
+        Opening if the gap qualifies, None otherwise.
+    """
+    near_jxn = bool(active_junctions) and _gap_near_junction(
+        gap_start, gap_start + gap_size, perp_pos, active_junctions, is_horizontal
+    )
+    min_span = relaxed_span_px if near_jxn else _OPENING_MIN_WALL_SPAN_PX
+    if left_span < min_span or right_span < min_span:
+        return None
+
+    type_candidate, confidence = _classify_gap(gap_size)
+
+    if near_jxn and (
+        left_span < _OPENING_MIN_WALL_SPAN_PX or right_span < _OPENING_MIN_WALL_SPAN_PX
+    ):
+        confidence = min(confidence, _OPENING_RELAXED_SPAN_CONFIDENCE)
+
+    gap_cx = gap_start + gap_size / 2.0
+    gap_cy = perp_pos
+    if arc_centers and _arc_near_gap(gap_cx, gap_cy, arc_centers, float(gap_size)):
+        confidence = _DOOR_ARC_CONFIDENCE
+
+    if is_horizontal:
+        bbox = (
+            gap_start,
+            perp_pos - half_thick,
+            gap_size,
+            float(_WALL_THICKNESS_EST_PX),
+        )
+    else:
+        bbox = (
+            perp_pos - half_thick,
+            gap_start,
+            float(_WALL_THICKNESS_EST_PX),
+            gap_size,
+        )
+
+    return Opening(type_candidate=type_candidate, bbox=bbox, confidence=confidence)
+
+
+def _detect_openings(
+    walls: list[Wall],
+    junctions: list[Point] | None = None,
+    arc_centers: list[tuple[float, float]] | None = None,
+    settings: Settings | None = None,
+) -> list[Opening]:
     """Detect opening candidates as gaps between collinear wall segments.
 
     Algorithm:
@@ -436,17 +734,42 @@ def _detect_openings(walls: list[Wall]) -> list[Opening]:
       3. Gaps within [_OPENING_MIN_GAP_PX, _OPENING_MAX_GAP_PX] become
          Opening candidates.  Type and confidence are heuristic.
 
+    Generous emission (07-cv-07):
+      - Gaps whose endpoint is adjacent to a wall junction use a relaxed span
+        threshold (settings.cv_opening_min_wall_span_px, default 60 px) instead
+        of the wide 170 px constant.  Confidence is capped at
+        _OPENING_RELAXED_SPAN_CONFIDENCE (0.35) when the relaxed path was needed.
+      - Gaps NOT adjacent to a junction keep the wide 170 px threshold so
+        mid-wall artefacts are not promoted (criterion 3).
+      - When a door-swing arc is detected near a gap, confidence is overridden
+        to _DOOR_ARC_CONFIDENCE (0.7).
+      - Aggressive filtering is PROHIBITED here — delegate to backend (F4,
+        ADR-009).
+
     The engine never decides the final type — the LLM in vitrina does (ADR-009).
     If no openings are detected, returns an empty list (never an error).
 
     Args:
         walls: Wall segments detected by _detect_walls.
+        junctions: Junction points from _fuse_junctions for relaxed span logic.
+            None disables the junction proximity check (all gaps use wide span).
+        arc_centers: Arc centre coordinates from _detect_door_arcs for
+            confidence boosting.  None disables arc check.
+        settings: Runtime settings.  Provides cv_opening_min_wall_span_px.
 
     Returns:
         List of Opening candidates (possibly empty).
     """
     if not walls:
         return []
+
+    # Resolved relaxed span for junction-adjacent gaps.
+    relaxed_span_px = (
+        settings.cv_opening_min_wall_span_px
+        if settings is not None
+        else _OPENING_MIN_WALL_SPAN_JUNCTION_PX
+    )
+    active_junctions: list[Point] = junctions or []
 
     # Bucket horizontal segments by y-midpoint bin, vertical by x-midpoint bin.
     h_buckets: dict[int, list[tuple[float, float, float, float]]] = {}
@@ -483,33 +806,24 @@ def _detect_openings(walls: list[Wall]) -> list[Opening]:
         merged = _merge_intervals(intervals, tol=float(_OPENING_MIN_ABERTURA_PX - 1))
         for idx in range(len(merged) - 1):
             gap_start = merged[idx][1]
-            gap_end = merged[idx + 1][0]
-            gap_w = gap_end - gap_start
-            # H2: discard gaps narrower than the minimum plausible opening.
+            gap_w = merged[idx + 1][0] - gap_start
+            # H2: discard gaps outside the plausible opening range.
             if not (_OPENING_MIN_ABERTURA_PX <= gap_w <= _OPENING_MAX_GAP_PX):
                 continue
-            # H1: discard corner/artefact gaps where either flanking wall
-            # segment is too short to be a real wall section.
-            left_span = merged[idx][1] - merged[idx][0]
-            right_span = merged[idx + 1][1] - merged[idx + 1][0]
-            if (
-                left_span < _OPENING_MIN_WALL_SPAN_PX
-                or right_span < _OPENING_MIN_WALL_SPAN_PX
-            ):
-                continue
-            type_candidate, confidence = _classify_gap(gap_w)
-            openings.append(
-                Opening(
-                    type_candidate=type_candidate,
-                    bbox=(
-                        gap_start,
-                        y_pos - half_thick,
-                        gap_w,
-                        float(_WALL_THICKNESS_EST_PX),
-                    ),
-                    confidence=confidence,
-                )
+            candidate = _build_opening_candidate(
+                gap_start=gap_start,
+                gap_size=gap_w,
+                perp_pos=y_pos,
+                left_span=merged[idx][1] - merged[idx][0],
+                right_span=merged[idx + 1][1] - merged[idx + 1][0],
+                is_horizontal=True,
+                relaxed_span_px=relaxed_span_px,
+                active_junctions=active_junctions,
+                arc_centers=arc_centers,
+                half_thick=half_thick,
             )
+            if candidate is not None:
+                openings.append(candidate)
 
     # --- Vertical groups: gaps along y axis ----------------------------------
     for bin_key, segs in v_buckets.items():
@@ -523,33 +837,24 @@ def _detect_openings(walls: list[Wall]) -> list[Opening]:
         )
         for idx in range(len(merged_v) - 1):
             gap_start = merged_v[idx][1]
-            gap_end = merged_v[idx + 1][0]
-            gap_h = gap_end - gap_start
-            # H2: discard gaps narrower than the minimum plausible opening.
+            gap_h = merged_v[idx + 1][0] - gap_start
+            # H2: discard gaps outside the plausible opening range.
             if not (_OPENING_MIN_ABERTURA_PX <= gap_h <= _OPENING_MAX_GAP_PX):
                 continue
-            # H1: discard corner/artefact gaps where either flanking wall
-            # segment is too short to be a real wall section.
-            left_span_v = merged_v[idx][1] - merged_v[idx][0]
-            right_span_v = merged_v[idx + 1][1] - merged_v[idx + 1][0]
-            if (
-                left_span_v < _OPENING_MIN_WALL_SPAN_PX
-                or right_span_v < _OPENING_MIN_WALL_SPAN_PX
-            ):
-                continue
-            type_candidate, confidence = _classify_gap(gap_h)
-            openings.append(
-                Opening(
-                    type_candidate=type_candidate,
-                    bbox=(
-                        x_pos - half_thick,
-                        gap_start,
-                        float(_WALL_THICKNESS_EST_PX),
-                        gap_h,
-                    ),
-                    confidence=confidence,
-                )
+            candidate = _build_opening_candidate(
+                gap_start=gap_start,
+                gap_size=gap_h,
+                perp_pos=x_pos,
+                left_span=merged_v[idx][1] - merged_v[idx][0],
+                right_span=merged_v[idx + 1][1] - merged_v[idx + 1][0],
+                is_horizontal=False,
+                relaxed_span_px=relaxed_span_px,
+                active_junctions=active_junctions,
+                arc_centers=arc_centers,
+                half_thick=half_thick,
             )
+            if candidate is not None:
+                openings.append(candidate)
 
     return openings
 
@@ -638,75 +943,322 @@ def _build_closed_wall_mask_for_rooms(
 
 
 # ---------------------------------------------------------------------------
+# F3 helpers — wall centerline estimation (07-cv-03)
+# ---------------------------------------------------------------------------
+
+
+def _sample_dt_along_segment(
+    dt: NDArray[np.float32],
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+) -> list[float]:
+    """Sample distance-transform values at regular intervals along a segment.
+
+    Samples every _DT_SAMPLE_STEP_PX pixels.  Coordinates are clamped to the
+    array bounds so endpoint artefacts near the image border are handled
+    gracefully.
+
+    Args:
+        dt: Float32 distance transform of the wall mask.
+        x1, y1, x2, y2: Segment endpoints in pixel coordinates.
+
+    Returns:
+        List of DT values (always contains at least one sample at the midpoint).
+    """
+    h, w = dt.shape
+    length = math.hypot(x2 - x1, y2 - y1)
+    n_steps = max(1, int(length / _DT_SAMPLE_STEP_PX))
+    values: list[float] = []
+    for i in range(n_steps + 1):
+        t = i / n_steps
+        px = max(0, min(round(x1 + t * (x2 - x1)), w - 1))
+        py = max(0, min(round(y1 + t * (y2 - y1)), h - 1))
+        values.append(float(dt[py, px]))
+    return values
+
+
+def _estimate_global_wall_thickness_px(
+    walls: list[Wall],
+    dt: NDArray[np.float32],
+) -> float:
+    """Estimate the typical wall stroke thickness in pixels.
+
+    For each Hough segment, computes ``2 x median(DT samples)``.  The global
+    estimate is the median of all per-segment thicknesses, making it robust to
+    short noise segments with atypical DT readings.
+
+    Args:
+        walls: Raw Hough segments from _detect_walls.
+        dt: Float32 distance transform of the (cleaned) wall mask.
+
+    Returns:
+        Estimated wall thickness in pixels.  Falls back to
+        ``_CENTERLINE_MIN_TOL_PX`` when no samples can be collected.
+    """
+    per_seg: list[float] = []
+    for wall in walls:
+        x1, y1 = wall.start
+        x2, y2 = wall.end
+        samples = _sample_dt_along_segment(dt, x1, y1, x2, y2)
+        if samples:
+            per_seg.append(2.0 * float(np.median(np.array(samples, dtype=np.float32))))
+    if not per_seg:
+        return _CENTERLINE_MIN_TOL_PX
+    thickness = float(np.median(np.array(per_seg, dtype=np.float32)))
+    return max(thickness, _CENTERLINE_MIN_TOL_PX)
+
+
+def _group_indices_by_proximity(
+    sorted_values: list[float],
+    tolerance: float,
+) -> list[tuple[int, int]]:
+    """Partition a sorted sequence into clusters by proximity.
+
+    Two consecutive elements belong to the same cluster when their difference
+    is <= *tolerance*.
+
+    Args:
+        sorted_values: Pre-sorted list of float values.
+        tolerance: Maximum gap to remain in the same cluster.
+
+    Returns:
+        List of (start_idx, end_idx_inclusive) pairs for each cluster.
+    """
+    if not sorted_values:
+        return []
+    groups: list[tuple[int, int]] = []
+    start = 0
+    for i in range(1, len(sorted_values)):
+        if sorted_values[i] - sorted_values[i - 1] > tolerance:
+            groups.append((start, i - 1))
+            start = i
+    groups.append((start, len(sorted_values) - 1))
+    return groups
+
+
+def _thickness_from_dt_samples(
+    dt: NDArray[np.float32],
+    segs: list[tuple[float, float, float, float]],
+) -> float | None:
+    """Compute 2 x median(DT samples) for a group of collinear segments.
+
+    Args:
+        dt: Float32 distance transform of the wall mask.
+        segs: List of (x1, y1, x2, y2) tuples.
+
+    Returns:
+        Thickness in pixels, or None when no samples are available.
+    """
+    all_samples: list[float] = []
+    for x1, y1, x2, y2 in segs:
+        all_samples.extend(_sample_dt_along_segment(dt, x1, y1, x2, y2))
+    if not all_samples:
+        return None
+    return float(2.0 * np.median(np.array(all_samples, dtype=np.float32)))
+
+
+# ---------------------------------------------------------------------------
 # F3 — Consolidated walls
 # ---------------------------------------------------------------------------
 
 
-def _consolidate_walls(walls: list[Wall]) -> list[Wall]:
+_RawSeg = tuple[float, float, float, float]  # (x1, y1, x2, y2)
+
+
+def _merge_segs_into_walls(
+    segs: list[_RawSeg],
+    perp_pos: float,
+    is_horizontal: bool,
+    thickness: float | None,
+    out: list[Wall],
+) -> None:
+    """Merge a group of collinear segments into Wall objects and append to *out*.
+
+    Applies _merge_intervals along the primary axis; each resulting span that
+    meets the minimum-length requirement produces one Wall.
+
+    Args:
+        segs: Collinear segments in the same perpendicular band.
+        perp_pos: The shared perpendicular coordinate (y for H, x for V).
+        is_horizontal: True for horizontal walls (primary axis = x).
+        thickness: Wall thickness in pixels, or None (legacy).
+        out: Accumulator list; new Walls are appended here.
+    """
+    if is_horizontal:
+        intervals: list[tuple[float, float]] = sorted(
+            (min(x1, x2), max(x1, x2)) for x1, _y1, x2, _y2 in segs
+        )
+        for start, end in _merge_intervals(
+            intervals, tol=float(_OPENING_MIN_ABERTURA_PX - 1)
+        ):
+            if end - start >= _MIN_WALL_LENGTH_PX:
+                out.append(
+                    Wall(
+                        start=(start, perp_pos),
+                        end=(end, perp_pos),
+                        thickness=thickness,
+                    )
+                )
+    else:
+        intervals_v: list[tuple[float, float]] = sorted(
+            (min(y1, y2), max(y1, y2)) for _x1, y1, _x2, y2 in segs
+        )
+        for start, end in _merge_intervals(
+            intervals_v, tol=float(_OPENING_MIN_ABERTURA_PX - 1)
+        ):
+            if end - start >= _MIN_WALL_LENGTH_PX:
+                out.append(
+                    Wall(
+                        start=(perp_pos, start),
+                        end=(perp_pos, end),
+                        thickness=thickness,
+                    )
+                )
+
+
+def _legacy_bin_consolidate(
+    h_segs: list[_RawSeg],
+    v_segs: list[_RawSeg],
+) -> list[Wall]:
+    """Fixed-bin consolidation — original pre-07-cv-03 behaviour (flag off)."""
+    out: list[Wall] = []
+    h_buckets: dict[int, list[_RawSeg]] = {}
+    v_buckets: dict[int, list[_RawSeg]] = {}
+
+    for x1, y1, x2, y2 in h_segs:
+        bin_key = int((y1 + y2) / 2) // _OPENING_COLLINEAR_TOL_PX
+        h_buckets.setdefault(bin_key, []).append((x1, y1, x2, y2))
+
+    for x1, y1, x2, y2 in v_segs:
+        bin_key = int((x1 + x2) / 2) // _OPENING_COLLINEAR_TOL_PX
+        v_buckets.setdefault(bin_key, []).append((x1, y1, x2, y2))
+
+    for bin_key, segs in h_buckets.items():
+        y_pos = bin_key * _OPENING_COLLINEAR_TOL_PX + _OPENING_COLLINEAR_TOL_PX / 2.0
+        _merge_segs_into_walls(segs, y_pos, is_horizontal=True, thickness=None, out=out)
+
+    for bin_key, segs in v_buckets.items():
+        x_pos = bin_key * _OPENING_COLLINEAR_TOL_PX + _OPENING_COLLINEAR_TOL_PX / 2.0
+        _merge_segs_into_walls(
+            segs, x_pos, is_horizontal=False, thickness=None, out=out
+        )
+
+    return out
+
+
+def _centerline_dt_consolidate(
+    walls: list[Wall],
+    h_segs: list[_RawSeg],
+    v_segs: list[_RawSeg],
+    wall_mask: NDArray[np.uint8],
+) -> list[Wall]:
+    """DT-based centerline consolidation (flag on, 07-cv-03)."""
+    dt: NDArray[np.float32] = cv2.distanceTransform(wall_mask, cv2.DIST_L2, 5)
+    wall_thickness_px = _estimate_global_wall_thickness_px(walls, dt)
+    _engine_logger.debug(
+        "cv_wall_centerline_thickness_estimated",
+        extra={"wall_thickness_px": round(wall_thickness_px, 1)},
+    )
+
+    out: list[Wall] = []
+
+    if h_segs:
+        h_segs.sort(key=lambda s: (s[1] + s[3]) / 2)
+        y_mids = [(s[1] + s[3]) / 2 for s in h_segs]
+        for g_start, g_end in _group_indices_by_proximity(y_mids, wall_thickness_px):
+            group = h_segs[g_start : g_end + 1]
+            y_pos = sum((s[1] + s[3]) / 2 for s in group) / len(group)
+            thickness = _thickness_from_dt_samples(dt, group)
+            _merge_segs_into_walls(
+                group, y_pos, is_horizontal=True, thickness=thickness, out=out
+            )
+
+    if v_segs:
+        v_segs.sort(key=lambda s: (s[0] + s[2]) / 2)
+        x_mids = [(s[0] + s[2]) / 2 for s in v_segs]
+        for g_start, g_end in _group_indices_by_proximity(x_mids, wall_thickness_px):
+            group_v = v_segs[g_start : g_end + 1]
+            x_pos = sum((s[0] + s[2]) / 2 for s in group_v) / len(group_v)
+            thickness_v = _thickness_from_dt_samples(dt, group_v)
+            _merge_segs_into_walls(
+                group_v, x_pos, is_horizontal=False, thickness=thickness_v, out=out
+            )
+
+    return out
+
+
+def _consolidate_walls(
+    walls: list[Wall],
+    wall_mask: NDArray[np.uint8] | None = None,
+    settings: Settings | None = None,
+) -> list[Wall]:
     """Merge collinear wall segments produced by HoughLinesP into longer walls.
 
     HoughLinesP fragments each physical wall into many short overlapping
-    segments (e.g., 131 for ~5 walls in a simple floor plan).  This function
-    applies the same binning and interval-merge logic used by _detect_openings
-    to produce one Wall object per continuous run of collinear segments,
-    drastically reducing the wall count and stabilising opening detection.
+    segments (e.g., 131 for ~5 walls in a simple floor plan).  Two modes are
+    available, controlled by ``settings.cv_wall_centerline_enabled``:
+
+    **Centerline mode (default, flag on):**
+      Estimates wall thickness via distanceTransform, groups parallel Hough
+      traces within that tolerance, and places the resulting Wall at the
+      average perpendicular coordinate with ``thickness`` in pixels.
+
+    **Legacy mode (flag off):**
+      Original fixed-bin behaviour; ``thickness`` is None.
 
     Args:
         walls: Raw wall segments from _detect_walls.
+        wall_mask: Binary wall mask (walls = 255).  Required for centerline mode;
+            if None the function falls back to legacy mode regardless of the flag.
+        settings: Runtime settings.  If None falls back to legacy mode.
 
     Returns:
-        Consolidated list of Wall objects (one per merged run per bin).
+        Consolidated list of Wall objects.  Emits ``walls_before_consolidation``
+        and ``walls_after_consolidation`` log records with wall counts.
     """
     if not walls:
         return []
 
-    h_buckets: dict[int, list[tuple[float, float, float, float]]] = {}
-    v_buckets: dict[int, list[tuple[float, float, float, float]]] = {}
-    diagonal: list[Wall] = []
+    _engine_logger.info(
+        "walls_before_consolidation",
+        extra={"walls_count": len(walls)},
+    )
 
+    # Classify segments by orientation.
+    h_segs: list[_RawSeg] = []
+    v_segs: list[_RawSeg] = []
+    diagonal: list[Wall] = []
     for wall in walls:
         x1, y1 = wall.start
         x2, y2 = wall.end
         angle_deg = math.degrees(math.atan2(abs(y2 - y1), abs(x2 - x1)))
-
         if angle_deg < _OPENING_ANGLE_TOL_DEG:
-            y_mid = (y1 + y2) / 2
-            bin_key = int(y_mid) // _OPENING_COLLINEAR_TOL_PX
-            h_buckets.setdefault(bin_key, []).append((x1, y1, x2, y2))
+            h_segs.append((x1, y1, x2, y2))
         elif angle_deg > (90.0 - _OPENING_ANGLE_TOL_DEG):
-            x_mid = (x1 + x2) / 2
-            bin_key = int(x_mid) // _OPENING_COLLINEAR_TOL_PX
-            v_buckets.setdefault(bin_key, []).append((x1, y1, x2, y2))
+            v_segs.append((x1, y1, x2, y2))
         else:
             diagonal.append(wall)
 
-    consolidated: list[Wall] = []
+    centerline_enabled: bool = (
+        wall_mask is not None
+        and settings is not None
+        and settings.cv_wall_centerline_enabled
+    )
 
-    for bin_key, segs in h_buckets.items():
-        y_pos = bin_key * _OPENING_COLLINEAR_TOL_PX + _OPENING_COLLINEAR_TOL_PX / 2.0
-        intervals: list[tuple[float, float]] = sorted(
-            (min(x1, x2), max(x1, x2)) for x1, _y1, x2, _y2 in segs
-        )
-        # Merge with the same tolerance used in gap detection to collapse
-        # Hough micro-gaps; real openings survive as actual gaps.
-        merged = _merge_intervals(intervals, tol=float(_OPENING_MIN_ABERTURA_PX - 1))
-        for start, end in merged:
-            if end - start >= _MIN_WALL_LENGTH_PX:
-                consolidated.append(Wall(start=(start, y_pos), end=(end, y_pos)))
-
-    for bin_key, segs in v_buckets.items():
-        x_pos = bin_key * _OPENING_COLLINEAR_TOL_PX + _OPENING_COLLINEAR_TOL_PX / 2.0
-        intervals_v: list[tuple[float, float]] = sorted(
-            (min(y1, y2), max(y1, y2)) for _x1, y1, _x2, y2 in segs
-        )
-        merged_v = _merge_intervals(
-            intervals_v, tol=float(_OPENING_MIN_ABERTURA_PX - 1)
-        )
-        for start, end in merged_v:
-            if end - start >= _MIN_WALL_LENGTH_PX:
-                consolidated.append(Wall(start=(x_pos, start), end=(x_pos, end)))
+    if centerline_enabled:
+        consolidated = _centerline_dt_consolidate(walls, h_segs, v_segs, wall_mask)  # type: ignore[arg-type]
+    else:
+        consolidated = _legacy_bin_consolidate(h_segs, v_segs)
 
     consolidated.extend(diagonal)
+
+    _engine_logger.info(
+        "walls_after_consolidation",
+        extra={"walls_count": len(consolidated)},
+    )
+
     return consolidated
 
 
@@ -760,6 +1312,710 @@ def _nms_openings(openings: list[Opening]) -> list[Opening]:
 
 
 # ---------------------------------------------------------------------------
+# F4 — Orthogonal snapping and junction fusion (07-cv-04)
+# ---------------------------------------------------------------------------
+
+
+def _snap_walls_orthogonal(walls: list[Wall]) -> list[Wall]:
+    """Snap near-horizontal / near-vertical segments to exact H/V axes.
+
+    For each wall segment the angle from horizontal is computed.  If the
+    segment is within *_SNAP_ANGLE_TOL_DEG* of either axis it is projected
+    onto that axis exactly:
+
+    - Near-horizontal (|angle| < tol): ``start.y = end.y = mean(y1, y2)``
+    - Near-vertical (|90 deg - angle| < tol): ``start.x = end.x = mean(x1, x2)``
+    - Otherwise (diagonal): returned unchanged.
+
+    This removes sub-pixel misalignments introduced by HoughLinesP that cause
+    "tooth" artefacts at wall junctions.
+
+    Args:
+        walls: Consolidated wall segments (post-centerline).
+
+    Returns:
+        New list of Wall objects.  Diagonal walls are the same objects;
+        snapped walls are reconstructed with the corrected coordinates.
+    """
+    snapped: list[Wall] = []
+    for wall in walls:
+        x1, y1 = wall.start
+        x2, y2 = wall.end
+        angle_deg = math.degrees(math.atan2(abs(y2 - y1), abs(x2 - x1)))
+
+        if angle_deg < _SNAP_ANGLE_TOL_DEG:
+            # Force exact horizontal: average the two y-coordinates.
+            y_avg = (y1 + y2) / 2.0
+            snapped.append(
+                Wall(start=(x1, y_avg), end=(x2, y_avg), thickness=wall.thickness)
+            )
+        elif angle_deg > (90.0 - _SNAP_ANGLE_TOL_DEG):
+            # Force exact vertical: average the two x-coordinates.
+            x_avg = (x1 + x2) / 2.0
+            snapped.append(
+                Wall(start=(x_avg, y1), end=(x_avg, y2), thickness=wall.thickness)
+            )
+        else:
+            # Legitimate diagonal — leave intact.
+            snapped.append(wall)
+
+    return snapped
+
+
+def _fuse_junctions(
+    walls: list[Wall],
+) -> tuple[list[Wall], list[Point]]:
+    """Fuse nearby endpoints from different walls into shared junction points.
+
+    For every pair of endpoints that belong to *different* walls, if their
+    Euclidean distance is strictly less than the wall thickness (``min`` of the
+    two walls' thicknesses, falling back to ``_WALL_THICKNESS_EST_PX`` when
+    ``thickness`` is None), both endpoints are merged to their centroid.
+
+    Transitively close endpoints are handled via Union-Find so that three walls
+    meeting at a single corner all share the same resulting junction coordinate.
+
+    The list of junction points is returned as an auxiliary output so that
+    downstream tasks (cv-07, door detection at corners) can consume it from
+    ``OpenCVClassicEngine._junctions`` without re-running the fusion step.
+
+    Args:
+        walls: Wall segments (typically already snapped by _snap_walls_orthogonal).
+
+    Returns:
+        ``(updated_walls, junctions)`` where *updated_walls* has the same length
+        as the input and *junctions* is the list of fused vertex coordinates
+        (one entry per multi-wall junction, deduplicated).
+    """
+    n = len(walls)
+    if n < _JUNCTION_MIN_CLUSTER_SIZE:
+        return walls, []
+
+    # Flatten endpoints into a mutable coordinate array.
+    # Index layout: 2*i → start of wall i, 2*i+1 → end of wall i.
+    coords: list[list[float]] = []
+    for wall in walls:
+        x1, y1 = wall.start
+        x2, y2 = wall.end
+        coords.append([x1, y1])
+        coords.append([x2, y2])
+
+    # ----- Union-Find (path-compressed) ------------------------------------
+    parent = list(range(2 * n))
+
+    def _find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def _union(a: int, b: int) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    # ----- Build distance graph and union close endpoint pairs -------------
+    for i in range(n):
+        t_i = (
+            walls[i].thickness
+            if walls[i].thickness is not None
+            else float(_WALL_THICKNESS_EST_PX)
+        )
+        for j in range(i + 1, n):
+            t_j = (
+                walls[j].thickness
+                if walls[j].thickness is not None
+                else float(_WALL_THICKNESS_EST_PX)
+            )
+            threshold = min(t_i, t_j)
+
+            for ep_i in (2 * i, 2 * i + 1):
+                for ep_j in (2 * j, 2 * j + 1):
+                    px_i, py_i = coords[ep_i]
+                    px_j, py_j = coords[ep_j]
+                    if math.hypot(px_j - px_i, py_j - py_i) < threshold:
+                        _union(ep_i, ep_j)
+
+    # ----- Compute centroids for each cluster with ≥ 2 members ------------
+    clusters: dict[int, list[int]] = defaultdict(list)
+    for idx in range(2 * n):
+        clusters[_find(idx)].append(idx)
+
+    junctions: list[Point] = []
+    for members in clusters.values():
+        if len(members) < _JUNCTION_MIN_CLUSTER_SIZE:  # singleton — no junction
+            continue
+        cx = sum(coords[m][0] for m in members) / len(members)
+        cy = sum(coords[m][1] for m in members) / len(members)
+        for m in members:
+            coords[m][0] = cx
+            coords[m][1] = cy
+        junctions.append((cx, cy))
+
+    # ----- Reconstruct Wall objects from updated coordinates ---------------
+    updated: list[Wall] = [
+        Wall(
+            start=(coords[2 * i][0], coords[2 * i][1]),
+            end=(coords[2 * i + 1][0], coords[2 * i + 1][1]),
+            thickness=walls[i].thickness,
+        )
+        for i in range(n)
+    ]
+
+    _engine_logger.debug(
+        "cv_junctions_fused",
+        extra={"junctions_count": len(junctions)},
+    )
+
+    return updated, junctions
+
+
+# ---------------------------------------------------------------------------
+# F5 — Window pattern detection (07-cv-06)
+# ---------------------------------------------------------------------------
+
+
+def _count_foreground_runs(profile: NDArray[np.uint8]) -> int:
+    """Count distinct foreground (255) runs in a 1-D binary mask profile.
+
+    A run is a contiguous sequence of non-zero pixels bordered by zero pixels
+    or the array boundary.
+
+    Args:
+        profile: 1-D uint8 array (values 0 or 255).
+
+    Returns:
+        Number of distinct foreground runs (0 when profile is all background).
+    """
+    in_run = False
+    count = 0
+    for px in profile:
+        if px > 0 and not in_run:
+            in_run = True
+            count += 1
+        elif px == 0 and in_run:
+            in_run = False
+    return count
+
+
+def _maybe_emit_window(
+    run_start: int,
+    run_end: int,
+    n_steps: int,
+    is_horizontal: bool,
+    axis_start: float,
+    axis_end: float,
+    y_center: float,
+    x_center: float,
+    half_thick: float,
+    full_thick: float,
+    openings: list[Opening],
+) -> None:
+    """Emit a window Opening if the candidate span meets size requirements.
+
+    Centralises the span-length check and bbox construction so the main loop
+    in ``_detect_window_pattern`` does not repeat the logic for both mid-span
+    breaks and the trailing run.
+
+    Args:
+        run_start: First flag index in the contiguous True run.
+        run_end: One-past-last flag index (exclusive).
+        n_steps: Total number of sampling steps for coordinate mapping.
+        is_horizontal: True for horizontal walls; False for vertical.
+        axis_start, axis_end: Wall extent along the primary axis (px).
+        y_center: Wall centerline y coordinate (used for horizontal walls).
+        x_center: Wall centerline x coordinate (used for vertical walls).
+        half_thick: Half the wall thickness in px.
+        full_thick: Full wall thickness in px.
+        openings: Accumulator list; new Opening is appended when criteria are met.
+    """
+    span_count = run_end - run_start
+    if span_count < _WIN_MIN_CONSECUTIVE_PROFILES:
+        return
+    span_px = float(span_count * _WIN_PROFILE_STEP_PX)
+    if span_px > _WIN_MAX_SPAN_PX:
+        return
+    t0 = run_start / n_steps
+    if is_horizontal:
+        open_x = axis_start + t0 * (axis_end - axis_start)
+        openings.append(
+            Opening(
+                type_candidate=OpeningTypeCandidate.window,
+                bbox=(open_x, y_center - half_thick, span_px, full_thick),
+                confidence=_WIN_CONFIDENCE,
+            )
+        )
+    else:
+        open_y = axis_start + t0 * (axis_end - axis_start)
+        openings.append(
+            Opening(
+                type_candidate=OpeningTypeCandidate.window,
+                bbox=(x_center - half_thick, open_y, full_thick, span_px),
+                confidence=_WIN_CONFIDENCE,
+            )
+        )
+
+
+def _build_window_flags(
+    original_mask: NDArray[np.uint8],
+    n_steps: int,
+    is_horizontal: bool,
+    axis_start: float,
+    axis_end: float,
+    perp_center: float,
+    scan_half: float,
+) -> list[bool]:
+    """Sample perpendicular profiles along a wall and flag double-line positions.
+
+    For each of *n_steps + 1* equidistant positions along the primary axis,
+    extract a 1-D profile perpendicular to the wall and check whether it
+    contains exactly ``_WIN_EXPECTED_RUNS`` foreground runs (the two parallel
+    lines of a window frame).
+
+    Args:
+        original_mask: Pre-filter binary mask (walls = 255).
+        n_steps: Number of sampling intervals along the wall axis.
+        is_horizontal: True for horizontal walls (primary axis = x).
+        axis_start, axis_end: Wall extent along the primary axis (px).
+        perp_center: Centerline coordinate on the perpendicular axis.
+        scan_half: Half-width of the scan extent around *perp_center* (px).
+
+    Returns:
+        Boolean list of length *n_steps + 1*.  True indicates a window profile.
+    """
+    mask_h, mask_w = original_mask.shape[:2]
+    flags: list[bool] = []
+    for step in range(n_steps + 1):
+        t = step / n_steps
+        pos = axis_start + t * (axis_end - axis_start)
+        if is_horizontal:
+            px_x = max(0, min(round(pos), mask_w - 1))
+            py0 = max(0, round(perp_center - scan_half))
+            py1 = min(mask_h, round(perp_center + scan_half))
+            if py1 <= py0:
+                flags.append(False)
+            else:
+                flags.append(
+                    _count_foreground_runs(original_mask[py0:py1, px_x])
+                    == _WIN_EXPECTED_RUNS
+                )
+        else:
+            py_y = max(0, min(round(pos), mask_h - 1))
+            px0 = max(0, round(perp_center - scan_half))
+            px1 = min(mask_w, round(perp_center + scan_half))
+            if px1 <= px0:
+                flags.append(False)
+            else:
+                flags.append(
+                    _count_foreground_runs(original_mask[py_y, px0:px1])
+                    == _WIN_EXPECTED_RUNS
+                )
+    return flags
+
+
+def _scan_window_runs(
+    window_flags: list[bool],
+    n_steps: int,
+    is_horizontal: bool,
+    axis_start: float,
+    axis_end: float,
+    y_center: float,
+    x_center: float,
+    half_thick: float,
+    full_thick: float,
+    openings: list[Opening],
+) -> None:
+    """Scan contiguous True runs in *window_flags* and emit window candidates.
+
+    Delegates span-validation and Opening construction to ``_maybe_emit_window``.
+
+    Args:
+        window_flags: Boolean flag list from ``_build_window_flags``.
+        n_steps: Total sampling steps (used for coordinate mapping).
+        is_horizontal: Orientation of the parent wall.
+        axis_start, axis_end: Wall axis extent in pixels.
+        y_center: Centerline y (for horizontal walls).
+        x_center: Centerline x (for vertical walls).
+        half_thick, full_thick: Wall half-/full-thickness in pixels.
+        openings: Accumulator; new Opening objects are appended here.
+    """
+    run_start_idx: int | None = None
+    for i, is_win in enumerate(window_flags):
+        if is_win and run_start_idx is None:
+            run_start_idx = i
+        elif not is_win and run_start_idx is not None:
+            _maybe_emit_window(
+                run_start_idx,
+                i,
+                n_steps,
+                is_horizontal,
+                axis_start,
+                axis_end,
+                y_center,
+                x_center,
+                half_thick,
+                full_thick,
+                openings,
+            )
+            run_start_idx = None
+    if run_start_idx is not None:
+        _maybe_emit_window(
+            run_start_idx,
+            len(window_flags),
+            n_steps,
+            is_horizontal,
+            axis_start,
+            axis_end,
+            y_center,
+            x_center,
+            half_thick,
+            full_thick,
+            openings,
+        )
+
+
+def _detect_window_pattern(
+    walls: list[Wall],
+    original_mask: NDArray[np.uint8],
+) -> list[Opening]:
+    """Detect window candidates as double-line patterns within wall spans (07-cv-06).
+
+    In vectorial floor plans windows are drawn as two thin parallel lines
+    INSIDE the wall width, not as gaps between wall segments.
+    ``filter_thin_strokes`` (step 4 of ``clean_mask``) removes these thin
+    frame lines before gap-based ``_detect_openings`` runs.  This function
+    operates on *original_mask* — the wall mask BEFORE step 4 — where the
+    thin window strands are still present.
+
+    Algorithm:
+      1. For each consolidated axis-aligned wall, sample perpendicular
+         cross-sections at ``_WIN_PROFILE_STEP_PX`` intervals via
+         ``_build_window_flags``.
+      2. A profile with exactly ``_WIN_EXPECTED_RUNS`` (2) foreground runs
+         indicates a double-line window section.
+      3. ``_WIN_MIN_CONSECUTIVE_PROFILES`` or more consecutive window profiles
+         form a candidate span emitted as Opening(type_candidate="window") via
+         ``_scan_window_runs`` and ``_maybe_emit_window``.
+
+    Confidence is conservative (``_WIN_CONFIDENCE = 0.35``); the LLM in
+    vitrina makes the final classification (ADR-009).  Returns an empty list
+    when no candidates are found — never raises.
+
+    Args:
+        walls: Consolidated Wall objects produced by the extract pipeline.
+        original_mask: Binary wall mask BEFORE ``filter_thin_strokes`` (steps
+            1-3 of ``clean_mask``).  Thin window frame strokes are visible here.
+
+    Returns:
+        List of Opening candidates (possibly empty).  Never raises.
+    """
+    if not walls:
+        return []
+
+    openings: list[Opening] = []
+
+    for wall in walls:
+        x1, y1 = wall.start
+        x2, y2 = wall.end
+        angle_deg = math.degrees(math.atan2(abs(y2 - y1), abs(x2 - x1)))
+
+        is_horizontal = angle_deg < _OPENING_ANGLE_TOL_DEG
+        is_vertical = angle_deg > (90.0 - _OPENING_ANGLE_TOL_DEG)
+        if not (is_horizontal or is_vertical):
+            continue  # diagonal walls — skip
+
+        half_thick = (
+            wall.thickness / 2.0
+            if wall.thickness is not None
+            else float(_WALL_THICKNESS_EST_PX) / 2.0
+        )
+        full_thick = (
+            wall.thickness
+            if wall.thickness is not None
+            else float(_WALL_THICKNESS_EST_PX)
+        )
+        scan_half = half_thick + _WIN_PROFILE_HALF_EXTRA_PX
+
+        if is_horizontal:
+            wall_len = abs(x2 - x1)
+            y_center, x_center = (y1 + y2) / 2.0, 0.0
+            axis_start, axis_end = min(x1, x2), max(x1, x2)
+            perp_center = y_center
+        else:
+            wall_len = abs(y2 - y1)
+            x_center, y_center = (x1 + x2) / 2.0, 0.0
+            axis_start, axis_end = min(y1, y2), max(y1, y2)
+            perp_center = x_center
+
+        if wall_len < _WIN_MIN_CONSECUTIVE_PROFILES * _WIN_PROFILE_STEP_PX:
+            continue
+
+        n_steps = max(1, int(wall_len / _WIN_PROFILE_STEP_PX))
+        window_flags = _build_window_flags(
+            original_mask,
+            n_steps,
+            is_horizontal,
+            axis_start,
+            axis_end,
+            perp_center,
+            scan_half,
+        )
+        _scan_window_runs(
+            window_flags,
+            n_steps,
+            is_horizontal,
+            axis_start,
+            axis_end,
+            y_center,
+            x_center,
+            half_thick,
+            full_thick,
+            openings,
+        )
+
+    return openings
+
+
+# ---------------------------------------------------------------------------
+# Staircase detection helpers (07-cv-10)
+# ---------------------------------------------------------------------------
+
+
+def _bbox_inside_any_room(
+    bx: float,
+    by: float,
+    bw: float,
+    bh: float,
+    rooms: list[Room],
+) -> bool:
+    """Return True if all four bbox corners lie inside at least one room polygon.
+
+    Uses cv2.pointPolygonTest(measureDist=False) which returns >= 0 for points
+    on the boundary or inside.  All four corners must pass the test against the
+    same room polygon for the bbox to be considered contained.
+
+    Args:
+        bx, by: Top-left corner of the bbox (px).
+        bw, bh: Width and height of the bbox (px).
+        rooms: Detected room polygons to test containment against.
+
+    Returns:
+        True if the bbox is contained in any room; False otherwise.
+    """
+    corners = [
+        (bx, by),
+        (bx + bw, by),
+        (bx, by + bh),
+        (bx + bw, by + bh),
+    ]
+    for room in rooms:
+        poly = np.array([[int(p[0]), int(p[1])] for p in room.polygon], dtype=np.int32)
+        if all(cv2.pointPolygonTest(poly, corner, False) >= 0 for corner in corners):
+            return True
+    return False
+
+
+def _find_equispaced_runs(
+    coords: list[float],
+) -> list[tuple[int, int]]:
+    """Return (start_idx, end_idx) slices of coords with ≥4 equi-spaced values.
+
+    A run is valid when:
+      - Every consecutive spacing is within [_STAIRS_MIN_SPACING_PX,
+        _STAIRS_MAX_SPACING_PX].
+      - std(spacings) / mean(spacings) ≤ _STAIRS_SPACING_MAX_REL_STD.
+
+    Args:
+        coords: Sorted 1-D array of perpendicular coordinates (one per tread).
+
+    Returns:
+        List of (start, end) index pairs (inclusive) for valid runs.
+    """
+    n = len(coords)
+    runs: list[tuple[int, int]] = []
+    i = 0
+    while i < n - 1:
+        run_end = i
+        for j in range(i + 1, n):
+            gap = coords[j] - coords[run_end]
+            if _STAIRS_MIN_SPACING_PX <= gap <= _STAIRS_MAX_SPACING_PX:
+                run_end = j
+            else:
+                break
+        run_len = run_end - i + 1
+        if run_len >= _STAIRS_MIN_LINES:
+            spacings = [coords[k + 1] - coords[k] for k in range(i, run_end)]
+            mean_sp = float(np.mean(spacings))
+            std_sp = float(np.std(spacings))
+            rel_std = std_sp / mean_sp if mean_sp > 0 else 1.0
+            if rel_std <= _STAIRS_SPACING_MAX_REL_STD:
+                runs.append((i, run_end))
+                i = run_end + 1
+                continue
+        i += 1
+    return runs
+
+
+_PerpFn = type(lambda x1, y1, x2, y2: 0.0)
+_Seg4 = tuple[float, float, float, float]
+
+
+def _merge_tread_slots(
+    tread_map: dict[int, list[_Seg4]],
+    perp_fn: _PerpFn,
+) -> list[tuple[float, list[_Seg4]]]:
+    """Merge adjacent tread bins into one representative slot per tread.
+
+    Args:
+        tread_map: Bin-index → segment list.
+        perp_fn: Returns perpendicular coordinate for a segment.
+
+    Returns:
+        Sorted ``(representative_coord, segments)`` list, one entry per tread.
+    """
+    _merge_tol = _STAIRS_COLLINEAR_BIN_PX * 2
+    merged: list[tuple[float, list[_Seg4]]] = []
+    for _b, segs in sorted(tread_map.items()):
+        mid_coord = float(np.median([perp_fn(*s) for s in segs]))
+        if merged and abs(mid_coord - merged[-1][0]) <= _merge_tol:
+            combined = merged[-1][1] + segs
+            merged[-1] = (
+                float(np.median([perp_fn(*s) for s in combined])),
+                combined,
+            )
+        else:
+            merged.append((mid_coord, list(segs)))
+    return merged
+
+
+def _stairs_runs_to_candidates(
+    tread_coords: list[float],
+    tread_dict: dict[float, list[_Seg4]],
+    rooms: list[Room],
+) -> list[StairsCandidate]:
+    """Convert equi-spaced tread runs into StairsCandidate objects.
+
+    Args:
+        tread_coords: Sorted perpendicular coordinates (one per tread).
+        tread_dict: Maps representative coord → segment list.
+        rooms: Room polygons for containment check.
+
+    Returns:
+        List of validated StairsCandidate objects.
+    """
+    candidates: list[StairsCandidate] = []
+    for run_start, run_end in _find_equispaced_runs(tread_coords):
+        all_segs: list[_Seg4] = []
+        for coord in tread_coords[run_start : run_end + 1]:
+            nearest = min(tread_dict.keys(), key=lambda k: abs(k - coord))
+            all_segs.extend(tread_dict[nearest])
+        xs = [v for x1, _y1, x2, _y2 in all_segs for v in (x1, x2)]
+        ys = [v for _x1, y1, _x2, y2 in all_segs for v in (y1, y2)]
+        bx, by = float(min(xs)), float(min(ys))
+        bw, bh = float(max(xs)) - bx, float(max(ys)) - by
+        if _bbox_inside_any_room(bx, by, bw, bh, rooms):
+            candidates.append(
+                StairsCandidate(
+                    bbox=[bx, by, bw, bh],
+                    direction=StairsDirection.unknown,
+                    confidence=_STAIRS_CONFIDENCE,
+                )
+            )
+    return candidates
+
+
+def _candidates_from_orientation(
+    lines: list[_Seg4],
+    perp_fn: _PerpFn,
+    rooms: list[Room],
+) -> list[StairsCandidate]:
+    """Scan one orientation's tread lines for equi-spaced staircase runs.
+
+    Args:
+        lines: Hough segments sharing the same orientation (H or V).
+        perp_fn: Perpendicular-coordinate function for this orientation.
+        rooms: Room polygons for containment validation.
+
+    Returns:
+        StairsCandidate objects found in this orientation.
+    """
+    if len(lines) < _STAIRS_MIN_LINES:
+        return []
+    tread_map: dict[int, list[_Seg4]] = defaultdict(list)
+    for seg in lines:
+        tread_map[int(perp_fn(*seg) / _STAIRS_COLLINEAR_BIN_PX)].append(seg)
+    merged = _merge_tread_slots(tread_map, perp_fn)
+    if len(merged) < _STAIRS_MIN_LINES:
+        return []
+    tread_coords = sorted(c for c, _ in merged)
+    tread_dict = {round(c, 1): segs for c, segs in merged}
+    return _stairs_runs_to_candidates(tread_coords, tread_dict, rooms)
+
+
+def _detect_stairs_candidates(
+    pre_filter_mask: NDArray[np.uint8],
+    rooms: list[Room],
+    settings: Settings | None,
+) -> list[StairsCandidate]:
+    """Detect staircase candidates from the pre-thin-filter binary mask.
+
+    Runs HoughLinesP with lower thresholds than wall detection to find thin
+    tread lines preserved in pre_filter_mask.  Groups lines by orientation
+    (H / V) and perpendicular position, then tests for ≥4 equi-spaced treads
+    with spacing in [_STAIRS_MIN_SPACING_PX, _STAIRS_MAX_SPACING_PX] px.
+    Anti-FP: the bbox of each candidate must be fully contained in a room
+    polygon (cv2.pointPolygonTest).
+
+    Must be called BEFORE filter_thin_strokes is applied to the mask
+    (i.e. using the pre_filter_mask intermediate, not the final wall_mask).
+
+    Args:
+        pre_filter_mask: Binary mask after cleanup steps 1-3 (thin lines kept).
+        rooms: Room polygons used for containment check.
+        settings: Runtime settings — checked for cv_stairs_detection_enabled.
+
+    Returns:
+        List of StairsCandidate objects (may be empty).
+    """
+    if settings is not None and not settings.cv_stairs_detection_enabled:
+        return []
+    if len(rooms) == 0:
+        return []
+    segments = cv2.HoughLinesP(
+        pre_filter_mask,
+        rho=_HOUGH_RHO,
+        theta=_HOUGH_THETA,
+        threshold=_STAIRS_HOUGH_THRESHOLD,
+        minLineLength=float(_STAIRS_HOUGH_MIN_LINE_PX),
+        maxLineGap=float(_STAIRS_HOUGH_MAX_GAP_PX),
+    )
+    if segments is None:
+        return []
+
+    h_lines: list[_Seg4] = []
+    v_lines: list[_Seg4] = []
+    for seg in segments:
+        x1, y1, x2, y2 = seg.reshape(4).tolist()
+        angle_deg = abs(math.degrees(math.atan2(y2 - y1, x2 - x1)))
+        if angle_deg > 90:  # noqa: PLR2004
+            angle_deg = 180.0 - angle_deg
+        if angle_deg <= _OPENING_ANGLE_TOL_DEG:
+            h_lines.append((x1, y1, x2, y2))
+        elif angle_deg >= 90.0 - _OPENING_ANGLE_TOL_DEG:
+            v_lines.append((x1, y1, x2, y2))
+
+    def _h_perp(x1: float, y1: float, x2: float, y2: float) -> float:
+        return (y1 + y2) / 2.0
+
+    def _v_perp(x1: float, y1: float, x2: float, y2: float) -> float:
+        return (x1 + x2) / 2.0
+
+    return _candidates_from_orientation(
+        h_lines, _h_perp, rooms
+    ) + _candidates_from_orientation(v_lines, _v_perp, rooms)
+
+
+# ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
 
@@ -770,13 +2026,24 @@ class OpenCVClassicEngine(GeometryEngine):
     Latency target: p95 < 20 s per image.
 
     After each extract() call the following intermediates are available on
-    the instance for reuse by task 06-cv-04 (openings / scale detection):
+    the instance for reuse by downstream tasks:
 
       _wall_mask : NDArray[np.uint8] | None
           Binary mask (walls = 255) produced by the binarisation pipeline.
 
       _gray : NDArray[np.uint8] | None
           Grayscale version of the last processed image (pre-blur, original).
+
+      _junctions : list[Point] | None
+          Shared corner coordinates produced by the endpoint fusion step
+          (07-cv-04).  Each entry is a ``(x, y)`` pixel coordinate where two
+          or more wall endpoints were merged.  Available for cv-07
+          (door-at-corner detection).
+
+      _pre_filter_mask : NDArray[np.uint8] | None
+          Binary wall mask BEFORE ``filter_thin_strokes`` (steps 1-3 of
+          ``clean_mask``).  Thin double-line window strokes are preserved here.
+          Used by ``_detect_window_pattern`` (07-cv-06).
 
     These attributes are internal implementation details; they are NOT part
     of the GeometryEngine contract and MUST NOT be accessed by routers.
@@ -793,6 +2060,13 @@ class OpenCVClassicEngine(GeometryEngine):
         # Intermediates for 06-cv-04 reuse — None until first extract() call.
         self._wall_mask: NDArray[np.uint8] | None = None
         self._gray: NDArray[np.uint8] | None = None
+        # Junction points produced by 07-cv-04 fusion step.  Available after
+        # each extract() call for downstream tasks (cv-07 door-at-corner).
+        self._junctions: list[Point] | None = None
+        # Pre-thin-filter mask for window pattern detection (07-cv-06).
+        # Holds the mask after cleanup steps 1-3 but before step 4 so that
+        # thin double-line window strokes are still visible.
+        self._pre_filter_mask: NDArray[np.uint8] | None = None
 
     @property
     def is_ready(self) -> bool:
@@ -861,8 +2135,13 @@ class OpenCVClassicEngine(GeometryEngine):
         # components (achurado diagonals, cota lines, text labels) do not
         # fragment walls or block CCA room enclosure.
         # The preflight gate evaluates the image BEFORE this step (ADR-005).
+        # Also compute pre_filter_mask (steps 1-3 only) so that thin window
+        # frame lines are preserved for _detect_window_pattern (07-cv-06).
         if self._settings is not None:
+            self._pre_filter_mask = clean_mask_steps_1_to_3(wall_mask, self._settings)
             wall_mask = clean_mask(wall_mask, self._settings)
+        else:
+            self._pre_filter_mask = wall_mask
 
         # ---- 5. Store intermediates (for 06-cv-04) ---------------------
         self._wall_mask = wall_mask
@@ -870,8 +2149,14 @@ class OpenCVClassicEngine(GeometryEngine):
 
         # ---- 6. Detect walls and consolidate (F3) ----------------------
         raw_walls = _detect_walls(wall_mask)
-        walls = _consolidate_walls(raw_walls)
+        walls = _consolidate_walls(raw_walls, wall_mask, self._settings)
         t_walls = time.monotonic()
+
+        # ---- 6b. Snap near-orthogonal walls and fuse junctions (07-cv-04) --
+        # Snapping first so that endpoints corrected to exact H/V are already
+        # axis-aligned when the junction fusion distance check runs.
+        walls = _snap_walls_orthogonal(walls)
+        walls, self._junctions = _fuse_junctions(walls)
 
         # ---- 7. Detect rooms with gap-closed mask (F1) -----------------
         # A separate closed mask bridges architectural openings so that CCA
@@ -890,6 +2175,15 @@ class OpenCVClassicEngine(GeometryEngine):
             if self._settings is not None
             else _ROOM_CLOSE_GAP_PX
         )
+        # Scale gaps with upscale factor so door openings are bridged correctly.
+        # upscale_factor is already computed above from normalize_resolution().
+        if (
+            self._settings is not None
+            and self._settings.cv_room_close_scale_with_upscale
+            and upscale_factor > 1.0
+        ):
+            _h_gap = round(_h_gap * upscale_factor)
+            _v_gap = round(_v_gap * upscale_factor)
         closed_wall_mask = _build_closed_wall_mask_for_rooms(
             wall_mask,
             close_h_gap_px=_h_gap,
@@ -898,11 +2192,84 @@ class OpenCVClassicEngine(GeometryEngine):
         rooms = _detect_rooms(closed_wall_mask, img_h, img_w)
         t_rooms = time.monotonic()
 
-        # ---- 8. Detect opening candidates, then NMS dedup (F2) ---------
-        openings = _nms_openings(_detect_openings(walls))
-        t_openings = time.monotonic()
+        # ---- 7b. Filter interior components (furniture / fixtures) ------
+        # Runs AFTER room detection because it needs the room polygons to test
+        # whether a wall-mask component is entirely enclosed by a room.
+        # Components whose bbox corners all lie strictly inside a room polygon
+        # (by more than CV_CLEANUP_INTERIOR_COMPONENTS_MARGIN_PX) are rectilinear
+        # furniture artefacts (tables, sofas) that survived steps 1-4 and are
+        # now removed.  If any components are removed the wall-mask changes, so
+        # walls are re-detected and consolidated to stay consistent.
+        if (
+            self._settings is not None
+            and self._settings.cv_cleanup_interior_components_enabled
+        ):
+            _margin = self._settings.cv_cleanup_interior_components_margin_px
+            wall_mask, _n_interior = filter_interior_components(
+                wall_mask, rooms, float(_margin)
+            )
+            if _n_interior > 0:
+                # Walls detected before this step may include furniture segments;
+                # re-detect from the updated mask to keep walls and openings consistent.
+                self._wall_mask = wall_mask
+                raw_walls = _detect_walls(wall_mask)
+                walls = _consolidate_walls(raw_walls, wall_mask, self._settings)
 
-        # ---- 9. Derive scale (06-cv-04) --------------------------------
+        # ---- 8. Detect opening candidates, then NMS dedup (F2) ---------
+        # Detect door-swing arcs for confidence boosting (07-cv-07 criterion b).
+        _arc_centers = _detect_door_arcs(self._gray) if self._gray is not None else []
+        # Gap-based detection (doors and gap-evident windows).
+        _gap_openings = _detect_openings(
+            walls,
+            junctions=self._junctions,
+            arc_centers=_arc_centers,
+            settings=self._settings,
+        )
+        # Pattern-based window detection (07-cv-06): double-line strokes within
+        # the wall span that filter_thin_strokes destroys from the main mask.
+        # Operates on the pre-filter mask where thin frame lines are preserved.
+        _window_openings = (
+            _detect_window_pattern(walls, self._pre_filter_mask)
+            if self._pre_filter_mask is not None
+            else []
+        )
+        openings = _nms_openings(_gap_openings + _window_openings)
+        t_openings = time.monotonic()
+        # Log openings emitted by type for observability (07-cv-07 criterion e).
+        _engine_logger.info(
+            "openings_emitted",
+            extra={
+                "door": sum(
+                    1 for o in openings if o.type_candidate == OpeningTypeCandidate.door
+                ),
+                "window": sum(
+                    1
+                    for o in openings
+                    if o.type_candidate == OpeningTypeCandidate.window
+                ),
+                "unknown": sum(
+                    1
+                    for o in openings
+                    if o.type_candidate == OpeningTypeCandidate.unknown
+                ),
+            },
+        )
+
+        # ---- 9. Detect staircase candidates (07-cv-10) -----------------
+        # Must use pre_filter_mask (thin tread lines still present) and the
+        # room list (for containment anti-FP check).  Called after rooms so
+        # that the polygon list is ready.
+        stairs_candidates = _detect_stairs_candidates(
+            self._pre_filter_mask,
+            rooms,
+            self._settings,
+        )
+        _engine_logger.info(
+            "stairs_candidates_count",
+            extra={"stairs_candidates_count": len(stairs_candidates)},
+        )
+
+        # ---- 10. Derive scale (06-cv-04) --------------------------------
         scale = _detect_scale(self._gray, self._settings)
         t_done = time.monotonic()
 
@@ -919,14 +2286,16 @@ class OpenCVClassicEngine(GeometryEngine):
                 "walls_count": len(walls),
                 "rooms_count": len(rooms),
                 "openings_count": len(openings),
+                "stairs_candidates_count": len(stairs_candidates),
             },
         )
 
-        # ---- 10. Assemble response -------------------------------------
+        # ---- 11. Assemble response -------------------------------------
         return Geometry(
             walls=walls,
             rooms=rooms,
             openings=openings,
+            stairs_candidates=stairs_candidates,
             scale=scale,
             image_size=ImageSize(width=img_w, height=img_h),
         )

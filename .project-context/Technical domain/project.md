@@ -65,6 +65,15 @@ Servicio de computer vision (Python 3.12+ / FastAPI) que extrae geometría deter
 - **Calibración thickness=5:** el paso 4 ahora **no escala hacia arriba** el umbral de grosor para imágenes native-res (res_scale capped at `CV_CLEANUP_RECTILINEAR_MAX_RES_SCALE`). Con umbral=5 px, muros de doble-línea de 5 px/strand sobreviven (max_dist=2.5px ≥ threshold/2=2.5px — borderline pero funcional).
 - **Efecto medido (calibración 2026-07-03, harness ADR-012):** plan-004 alta-res (4460×3260 px, 300 px/m): 0→4/4 rooms, score 0.000→0.981. Sin regresión: plan-002 1.000, plan-003 0.625.
 
+## Detección de escaleras (07-cv-10)
+
+- **Módulo:** `src/vitrina_cv/engines/opencv_classic.py` — función `_detect_stairs_candidates`
+- **Posición en pipeline:** paso 9, DESPUÉS de rooms (necesita polígonos para anti-FP) y ANTES de `_detect_scale`.
+- **Máscara usada:** `_pre_filter_mask` (pasos 1-3 del cleanup, sin `filter_thin_strokes`) — los peldaños delgados se preservan aquí.
+- **Algoritmo:** HoughLinesP con threshold=20, minLineLength=20 px; agrupa por orientación H/V; binning de coordenada perpendicular en slots de 5 px; merging de slots adyacentes; runs de ≥4 treads con spacing 20-40 px y varianza relativa ≤ 20 %; bbox del run verificado con `cv2.pointPolygonTest` contra room polygons.
+- **Setting:** `CV_STAIRS_DETECTION_ENABLED=true` (default). Con false, `stairs_candidates=[]` y pipeline sin cambios.
+- **Log:** `stairs_candidates_count` emitido en cada `extract()`.
+
 ## Convenciones establecidas
 
 - Python 3.12+, type hints en todo el código

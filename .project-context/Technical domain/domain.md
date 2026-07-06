@@ -9,7 +9,7 @@ Extraer geometría determinista de planos arquitectónicos PNG (paredes, habitac
 ## Bounded contexts detectados
 
 ### extract-geometry
-Procesamiento del plano para producir la geometría completa (`Geometry`): paredes como segmentos, polígonos de habitaciones, aberturas candidatas y escala opcional.
+Procesamiento del plano para producir la geometría completa (`Geometry`): paredes como segmentos, polígonos de habitaciones, aberturas candidatas, escaleras candidatas y escala opcional.
 
 ```
 api/

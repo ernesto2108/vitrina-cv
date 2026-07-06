@@ -1,7 +1,7 @@
 # Context Navigator — vitrina-cv
 
 last_full_scan: 2026-07-02
-last_updated: 2026-07-03T23:30:00  # reporter delta: calibración plan-004 — retain_rectilinear condicional + thickness cap; score plan-004 0.000→0.981; sin regresión plan-002/003
+last_updated: 2026-07-06T05:00:00  # reporter delta: 07-cv-10 _detect_stairs_candidates + CV_STAIRS_DETECTION_ENABLED
 coverage: bootstrap
 
 ## Índice

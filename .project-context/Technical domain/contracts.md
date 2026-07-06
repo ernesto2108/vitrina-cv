@@ -54,6 +54,7 @@ Ninguna — el servicio es interno, en red privada. Los requests llegan solo des
   }
   ```
   - Todas las coordenadas en pixeles de la imagen recibida.
+  - `walls[].thickness`: cuando `CV_WALL_CENTERLINE_ENABLED=true` (default) contiene el grosor estimado en **píxeles** (`2 x median(distanceTransform samples)`). El consumidor Go multiplica `thickness_px * metersPerPx`. `null` cuando el flag está desactivado (legacy mode).
   - `scale.source="none"` cuando no hay referencias de medida; nunca bloquea la respuesta.
 - **Response 400:** `{ error_code: "invalid_request", message: string }`
 - **Response 422:** `{ error_code: "unprocessable_image", message: string }`
