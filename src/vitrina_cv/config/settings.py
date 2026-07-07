@@ -374,6 +374,55 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Wall diagonal filter (08-cv-01) ---
+    cv_wall_diagonal_filter_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True, wall segments whose angle (abs of atan2(dy,dx)) falls in "
+            "[CV_WALL_DIAGONAL_FILTER_LOW_DEG, CV_WALL_DIAGONAL_FILTER_HIGH_DEG] "
+            "are discarded after _consolidate_walls classification. "
+            "Removes stair lines and sectional-door diagonals (~45°) that Hough "
+            "misidentifies as walls. Set False to restore pre-08 behaviour. "
+            "Default: True."
+        ),
+    )
+    cv_wall_diagonal_filter_low_deg: float = Field(
+        default=20.0,
+        ge=0.0,
+        le=90.0,
+        description=(
+            "Lower bound (degrees, inclusive) of the diagonal discard range. "
+            "Segments with atan2(|dy|,|dx|) >= this value are candidates for "
+            "discard. Default: 20.0."
+        ),
+    )
+    cv_wall_diagonal_filter_high_deg: float = Field(
+        default=70.0,
+        ge=0.0,
+        le=90.0,
+        description=(
+            "Upper bound (degrees, inclusive) of the diagonal discard range. "
+            "Segments with atan2(|dy|,|dx|) <= this value are candidates for "
+            "discard. Combined with the lower bound this removes the 20°-70° band. "
+            "Default: 70.0."
+        ),
+    )
+
+    # --- Rectilinear adaptive filter for high-res images (08-cv-03) ---
+    cv_cleanup_rectilinear_adaptive_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True, retain_rectilinear is applied to native high-resolution "
+            "images (long side > CV_UPSCALE_TARGET_PX) using an adaptive kernel "
+            "len_px = max(50, round(CV_CLEANUP_RECTILINEAR_LEN_PX * min(h,w) / "
+            "CV_UPSCALE_TARGET_PX)) instead of being skipped entirely. "
+            "This suppresses diagonal hatching even in high-res plans while "
+            "preserving long perimeter walls. "
+            "When False, the previous skip behaviour is preserved for high-res "
+            "images. Default: True."
+        ),
+    )
+
     # --- Wall centerline (07-cv-03) ---
     cv_wall_centerline_enabled: bool = Field(
         default=True,

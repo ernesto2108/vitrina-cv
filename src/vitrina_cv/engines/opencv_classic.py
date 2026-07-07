@@ -1252,7 +1252,32 @@ def _consolidate_walls(
     else:
         consolidated = _legacy_bin_consolidate(h_segs, v_segs)
 
-    consolidated.extend(diagonal)
+    # F1 (08-cv-01) — discard diagonal segments in [low_deg, high_deg].
+    # Applied only when the flag is enabled; otherwise all diagonal segments
+    # are kept (pre-08 behaviour, AC-3).
+    diagonal_filter_enabled: bool = (
+        settings is not None and settings.cv_wall_diagonal_filter_enabled
+    )
+    if diagonal_filter_enabled and settings is not None:
+        low_deg = settings.cv_wall_diagonal_filter_low_deg
+        high_deg = settings.cv_wall_diagonal_filter_high_deg
+        kept_diagonal: list[Wall] = []
+        discarded_count = 0
+        for wall in diagonal:
+            x1, y1 = wall.start
+            x2, y2 = wall.end
+            angle_deg = math.degrees(math.atan2(abs(y2 - y1), abs(x2 - x1)))
+            if low_deg <= angle_deg <= high_deg:
+                discarded_count += 1
+            else:
+                kept_diagonal.append(wall)
+        consolidated.extend(kept_diagonal)
+        _engine_logger.info(
+            "diagonal_walls_discarded",
+            extra={"count": discarded_count},
+        )
+    else:
+        consolidated.extend(diagonal)
 
     _engine_logger.info(
         "walls_after_consolidation",

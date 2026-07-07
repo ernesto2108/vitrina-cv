@@ -464,17 +464,48 @@ def clean_mask(
     # without yielding meaningful hatch-removal benefit (thick-wall plans rarely
     # use dense diagonal hatching).
     if resolution_scale_raw <= settings.cv_cleanup_rectilinear_max_res_scale:
-        cleaned = retain_rectilinear(cleaned, settings.cv_cleanup_rectilinear_len_px)
+        # Standard resolution: use the fixed configured kernel length.
+        rectilinear_len_px_used = settings.cv_cleanup_rectilinear_len_px
+        cleaned = retain_rectilinear(cleaned, rectilinear_len_px_used)
         _logger.info(
             "cv_cleanup_step2_rectilinear",
-            extra={"resolution_scale": round(resolution_scale_raw, 3), "applied": True},
+            extra={
+                "resolution_scale": round(resolution_scale_raw, 3),
+                "applied": True,
+                "rectilinear_len_px_used": rectilinear_len_px_used,
+            },
+        )
+    elif settings.cv_cleanup_rectilinear_adaptive_enabled:
+        # F2 (08-cv-03) — high-res adaptive mode: scale the kernel proportionally
+        # so diagonal hatching is suppressed even in native high-res images.
+        # Formula: max(50, round(base_len * min(h,w) / upscale_target_px))
+        img_h, img_w = cleaned.shape[:2]
+        rectilinear_len_px_used = max(
+            50,
+            round(
+                settings.cv_cleanup_rectilinear_len_px
+                * min(img_h, img_w)
+                / max(1, settings.cv_upscale_target_px)
+            ),
+        )
+        cleaned = retain_rectilinear(cleaned, rectilinear_len_px_used)
+        _logger.info(
+            "cv_cleanup_step2_rectilinear",
+            extra={
+                "resolution_scale": round(resolution_scale_raw, 3),
+                "applied": True,
+                "adaptive": True,
+                "rectilinear_len_px_used": rectilinear_len_px_used,
+            },
         )
     else:
+        # Legacy skip: high-res image and adaptive flag off — no-op (AC-6/pre-08).
         _logger.info(
             "cv_cleanup_step2_rectilinear",
             extra={
                 "resolution_scale": round(resolution_scale_raw, 3),
                 "applied": False,
+                "rectilinear_len_px_used": None,
             },
         )
 
@@ -562,6 +593,18 @@ def clean_mask_steps_1_to_3(
     resolution_scale_raw = long_side_raw / max(1, settings.cv_upscale_target_px)
     if resolution_scale_raw <= settings.cv_cleanup_rectilinear_max_res_scale:
         cleaned = retain_rectilinear(cleaned, settings.cv_cleanup_rectilinear_len_px)
+    elif settings.cv_cleanup_rectilinear_adaptive_enabled:
+        # F2 (08-cv-03) — adaptive mode for high-res images (mirrors clean_mask).
+        img_h, img_w = cleaned.shape[:2]
+        adaptive_len_px = max(
+            50,
+            round(
+                settings.cv_cleanup_rectilinear_len_px
+                * min(img_h, img_w)
+                / max(1, settings.cv_upscale_target_px)
+            ),
+        )
+        cleaned = retain_rectilinear(cleaned, adaptive_len_px)
 
     # Step 3 — crop to main component
     if settings.cv_cleanup_crop_enabled:

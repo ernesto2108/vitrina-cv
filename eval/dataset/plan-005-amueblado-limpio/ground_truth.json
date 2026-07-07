@@ -1,0 +1,8 @@
+{
+  "plan_id": "plan-005-amueblado-limpio",
+  "expected_rooms": 5,
+  "room_areas_m2": null,
+  "expected_doors": 5,
+  "expected_windows": 6,
+  "notes": "Plano residencial con muebles dibujados (camas, sofás, mesa comedor, sanitarios). 5 ambientes visibles: baño sup-izq, dormitorio sup-der (con camas), sala-comedor (zona derecha, área grande), dormitorio medio-izq (con camas), dormitorio inf (con cama). Los muebles son el GAP CRÍTICO: aparecen como manchas oscuras en la máscara y se convierten en paredes o fragmentan el suelo. Imagen 612x612px — upscaler actúa. Sin escala ni cotas — métrica de área desactivada."
+}

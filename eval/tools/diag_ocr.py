@@ -72,9 +72,7 @@ def diagnose(image_path: Path, settings: Settings) -> None:
     # Etapa 4: asociaciones token -> línea
     candidates: list[float] = []
     for tok in tokens:
-        value_m = scale_ocr._infer_unit_and_metres(
-            float(str(tok["value"]))
-        )
+        value_m = scale_ocr._infer_unit_and_metres(float(str(tok["value"])))
         if value_m is None or not (
             scale_ocr._DIM_MIN_M <= value_m <= scale_ocr._DIM_MAX_M
         ):

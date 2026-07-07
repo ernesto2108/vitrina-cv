@@ -49,9 +49,7 @@ def _dump(mask: NDArray[np.uint8], dump_dir: Path | None, name: str) -> None:
     dump_dir.mkdir(parents=True, exist_ok=True)
     h, w = mask.shape[:2]
     factor = _PREVIEW_LONG_SIDE / max(h, w)
-    preview = cv2.resize(
-        mask, (max(1, round(w * factor)), max(1, round(h * factor)))
-    )
+    preview = cv2.resize(mask, (max(1, round(w * factor)), max(1, round(h * factor))))
     out = dump_dir / f"{name}.png"
     cv2.imwrite(str(out), preview)
     print(f"      dump -> {out}")
@@ -162,7 +160,9 @@ def _report_results(
     )
 
     print(f"  rooms con máscara cruda            : {_rooms_count(mask, settings)}")
-    print(f"  rooms con máscara limpia           : {_rooms_count(cleaned_real, settings)}")
+    print(
+        f"  rooms con máscara limpia           : {_rooms_count(cleaned_real, settings)}"
+    )
 
     # Grosor máximo de trazo — útil para calibrar el umbral del paso 4
     if _px_on(cleaned_real) > 0:
