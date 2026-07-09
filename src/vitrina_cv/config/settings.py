@@ -594,6 +594,21 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Junction extend adaptive cap (10-cv-06, ADR-003 part A2) ---
+    cv_wall_junction_extend_adaptive_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True, _extend_to_intersection caps a wall endpoint "
+            "extension so it never crosses a nearer perpendicular wall, "
+            "instead of always reaching the full cv_junction_extend_px gap. "
+            "Prevents the fixed 40px extension from invading a neighbouring "
+            "room in dense plans (ADR-003, part A2). Emits "
+            "junction_extend_capped_count when the cap is applied. "
+            "When False, restores the pre-10-cv-06 fixed behaviour exactly "
+            "(byte-for-byte). Default: True."
+        ),
+    )
+
     # --- Staircase detection (07-cv-10) ---
     cv_stairs_detection_enabled: bool = Field(
         default=True,

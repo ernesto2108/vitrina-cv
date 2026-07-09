@@ -1,7 +1,7 @@
 # Context Navigator — vitrina-cv
 
 last_full_scan: 2026-07-02
-last_updated: 2026-07-08T02:00:00  # reporter delta: 10-cv-02 corrección quirúrgica de _sanitize_room_polygon (deviación perpendicular), setting CV_ROOM_CONTOUR_DEVIATION_MIN_PX
+last_updated: 2026-07-09T00:00:00  # reporter delta: 10-cv-06 extensión de junction adaptativa (ADR-003 A2), setting CV_WALL_JUNCTION_EXTEND_ADAPTIVE_ENABLED
 coverage: bootstrap
 
 ## Índice

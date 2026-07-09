@@ -297,6 +297,14 @@ Comandos:
 - **Cuándo usar:** al ajustar la banda diagonal, el umbral de longitud o el umbral de deviación para saneo de polígonos de room; único punto de cambio para este fix.
 - **Anti-pattern:** introducir una banda de ángulo nueva en vez de reusar `cv_wall_diagonal_filter_low_deg/high_deg`; llamar antes de `approxPolyDP`; ignorar el retorno `None` (indica room no recuperable, debe descartarse, no emitirse con arista diagonal); aplicar el criterio de ángulo+longitud sin la condición de deviación (reintroduce el falso positivo de 10-cv-02).
 
+### _nearest_perpendicular_wall_distance + tope adaptativo en _extend_to_intersection (10-cv-06, ADR-003 A2) — engines/opencv_classic.py
+- **Archivo:** `src/vitrina_cv/engines/opencv_classic.py`
+- **Qué hace:** complementa `cv_junction_extend_px` (fijo, 40px) con un tope adaptativo. `_nearest_perpendicular_wall_distance` busca, a lo largo del camino de extensión de un endpoint, si otro muro perpendicular cruza esa línea antes del `target`/intersección geométrica; si lo encuentra, `_extend_wall_endpoint_to_value` recorta la extensión a ese cruce en vez de al valor completo. Cada recorte real incrementa `junction_extend_capped_count` (logueado como INFO). `_extend_to_intersection` ahora acepta `adaptive_cap_enabled: bool` (keyword-only) y propaga `all_coords`/`self_idx`/`fixed_pos` a cada llamada de `_extend_wall_endpoint_to_value`.
+- **Gating:** `cv_wall_junction_extend_adaptive_enabled` (default `True`) en `settings.py`. Con `False`, `_extend_to_intersection` es idéntico byte-for-byte al comportamiento pre-10-cv-06 (fijo, sin tope).
+- **Verificado (overrides reales `docker-compose-local.yml`):** `plan-001-denso-achurado` (69 walls/9 rooms), `plan-002-simple-limpio` (26/6), `plan-003-reticula-cotas` (85/9), `plan-005-amueblado-limpio` (26/6) — idénticos con el flag on/off; sin regresión sobre baseline post-10-cv-01/10-cv-05.
+- **Cuándo usar:** al ajustar la lógica de tope de extensión de junction; único punto de cambio para ADR-003 parte A2.
+- **Anti-pattern:** calcular el tope solo contra el par ortogonal actual (i,j) sin considerar otros muros del plano — un tercer muro perpendicular más cercano es precisamente el caso que este fix debe capturar; aplicar el tope cuando `adaptive_cap_enabled=False` (debe ser no-op exacto).
+
 ### TYPE_CHECKING para imports de tipo-only
 - **Archivo:** `src/vitrina_cv/engines/base.py`, `engines/opencv_classic.py`, `preflight/checks.py`
 - **Qué hace:** agrupa imports usados solo en annotations bajo `if TYPE_CHECKING:` — evita circular imports y reduce overhead

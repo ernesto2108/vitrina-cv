@@ -1689,22 +1689,111 @@ def _snap_walls_orthogonal(walls: list[Wall]) -> list[Wall]:
     return snapped
 
 
+def _nearest_perpendicular_wall_distance(
+    coords: list[list[float]],
+    self_idx: int,
+    axis: int,
+    fixed_pos: float,
+    from_value: float,
+    target: float,
+) -> float | None:
+    """Find the distance to the nearest perpendicular wall along the extension path.
+
+    Used by the adaptive junction-extend cap (ADR-003, part A2): when
+    extending a wall endpoint toward *target*, this checks whether some
+    *other* orthogonal wall crosses the line ``fixed_pos`` (the wall being
+    extended's non-varying coordinate) strictly between *from_value* and
+    *target*. If one does, its crossing point limits how far the extension
+    may legitimately go — extending past it would cross into a neighbouring
+    room instead of closing a real corner gap.
+
+    Args:
+        coords: Mutable per-wall ``[x1, y1, x2, y2]`` coordinate lists.
+        self_idx: Index of the wall being extended (excluded from the search).
+        axis: 0 if the wall being extended is horizontal (extending along x),
+            1 if vertical (extending along y). The perpendicular walls
+            searched are the opposite orientation.
+        fixed_pos: The constant coordinate of the wall being extended (its y
+            for a horizontal wall, its x for a vertical wall).
+        from_value: Current endpoint coordinate along *axis* (start of the
+            candidate extension range, exclusive).
+        target: The intersection coordinate along *axis* (end of the
+            candidate extension range).
+
+    Returns:
+        The nearest crossing coordinate strictly between *from_value* and
+        *target* (exclusive of *from_value*), or ``None`` if no perpendicular
+        wall crosses within that open range.
+    """
+    lo, hi = (from_value, target) if from_value <= target else (target, from_value)
+    best: float | None = None
+    for k, other in enumerate(coords):
+        if k == self_idx:
+            continue
+        ox1, oy1, ox2, oy2 = other
+        other_is_h = oy1 == oy2
+        other_is_v = ox1 == ox2
+        if axis == 0:
+            # Extending a horizontal wall along x: look for vertical walls
+            # whose x-position crosses the path and whose y-span covers
+            # fixed_pos (the horizontal wall's y).
+            if not other_is_v:
+                continue
+            cross = ox1
+            span_lo, span_hi = (oy1, oy2) if oy1 <= oy2 else (oy2, oy1)
+        else:
+            # Extending a vertical wall along y: look for horizontal walls
+            # whose y-position crosses the path and whose x-span covers
+            # fixed_pos (the vertical wall's x).
+            if not other_is_h:
+                continue
+            cross = oy1
+            span_lo, span_hi = (ox1, ox2) if ox1 <= ox2 else (ox2, ox1)
+
+        if not (span_lo - 1e-6 <= fixed_pos <= span_hi + 1e-6):
+            continue
+        if not (lo < cross < hi):
+            continue
+        dist = abs(cross - from_value)
+        if best is None or dist < best:
+            best = dist
+    return best
+
+
 def _extend_wall_endpoint_to_value(
     coords: list[float],
     axis: int,
     target: float,
     extend_px: int,
+    *,
+    all_coords: list[list[float]] | None = None,
+    self_idx: int = -1,
+    fixed_pos: float = 0.0,
+    adaptive_cap_enabled: bool = False,
+    capped_counter: list[int] | None = None,
 ) -> None:
     """Move the nearer endpoint of a segment (in *axis*) to *target* if eligible.
 
     Eligibility: the target lies strictly beyond the segment's current extent
     (i.e. in its prolongation) and the gap is <= *extend_px*.
 
+    When *adaptive_cap_enabled* is True (ADR-003, part A2), the extension is
+    additionally capped so it never crosses a nearer perpendicular wall found
+    via ``_nearest_perpendicular_wall_distance`` — this prevents a 40px fixed
+    extension from invading a neighbouring room in dense plans. Each time the
+    cap actually reduces the extension below *extend_px*, *capped_counter[0]*
+    is incremented (``junction_extend_capped_count``).
+
     Args:
         coords: Mutable ``[x1, y1, x2, y2]`` list for the wall.
         axis: 0 for x-axis (horizontal wall), 1 for y-axis (vertical wall).
         target: Target coordinate value (intersection x or y).
         extend_px: Maximum gap (px) that triggers extension.
+        all_coords: All walls' coordinate lists, for the adaptive cap search.
+        self_idx: Index of this wall within *all_coords*.
+        fixed_pos: The constant coordinate of this wall (y for H, x for V).
+        adaptive_cap_enabled: Whether to apply the adaptive cap.
+        capped_counter: Single-element mutable list used as an int accumulator.
     """
     # Index offsets for (start, end) along *axis*: 0/2 for x, 1/3 for y.
     idx1, idx2 = axis, axis + 2
@@ -1712,16 +1801,38 @@ def _extend_wall_endpoint_to_value(
     lo, hi = (v1, v2) if v1 <= v2 else (v2, v1)
     lo_idx, hi_idx = (idx1, idx2) if v1 <= v2 else (idx2, idx1)
 
+    def _resolve_target(from_value: float, raw_target: float) -> float:
+        if not adaptive_cap_enabled or all_coords is None:
+            return raw_target
+        nearest = _nearest_perpendicular_wall_distance(
+            all_coords, self_idx, axis, fixed_pos, from_value, raw_target
+        )
+        if nearest is None:
+            return raw_target
+        capped_value = (
+            from_value + nearest if raw_target > from_value else from_value - nearest
+        )
+        if abs(capped_value - from_value) < abs(raw_target - from_value):
+            if capped_counter is not None:
+                capped_counter[0] += 1
+            return capped_value
+        return raw_target
+
     # Extend the high (rightmost/bottommost) endpoint rightward/downward.
     if target > hi and target - hi <= extend_px:
-        coords[hi_idx] = target
+        coords[hi_idx] = _resolve_target(hi, target)
 
     # Extend the low (leftmost/topmost) endpoint leftward/upward.
     if target < lo and lo - target <= extend_px:
-        coords[lo_idx] = target
+        coords[lo_idx] = _resolve_target(lo, target)
 
 
-def _extend_to_intersection(walls: list[Wall], extend_px: int) -> list[Wall]:
+def _extend_to_intersection(
+    walls: list[Wall],
+    extend_px: int,
+    *,
+    adaptive_cap_enabled: bool = False,
+) -> list[Wall]:
     """Extend H/V wall endpoints to their geometric intersection to close gaps.
 
     Operates between ``_snap_walls_orthogonal`` (walls are already exact H/V)
@@ -1747,6 +1858,17 @@ def _extend_to_intersection(walls: list[Wall], extend_px: int) -> list[Wall]:
       the boundary) or is farther than *extend_px*, so the output is unchanged.
     - ``wall.thickness`` is preserved unchanged on every reconstructed Wall.
 
+    Adaptive cap (ADR-003, part A2, 10-cv-06): when *adaptive_cap_enabled* is
+    True, an extension that would cross a nearer perpendicular wall is capped
+    to that wall's crossing point instead of reaching the full *extend_px* (or
+    the geometric intersection, whichever triggered the move). This prevents
+    the fixed ``cv_junction_extend_px=40`` from invading a neighbouring room
+    in dense plans while leaving legitimate extensions (no perpendicular wall
+    in the way) unaffected. Every time the cap actually reduces an extension,
+    ``junction_extend_capped_count`` is incremented and logged. With the flag
+    False (default off — legacy fixed behaviour), this function is unchanged
+    byte-for-byte from the pre-10-cv-06 version.
+
     Coordinate system: image convention (x grows right, y grows down).
 
     Args:
@@ -1756,6 +1878,8 @@ def _extend_to_intersection(walls: list[Wall], extend_px: int) -> list[Wall]:
         extend_px: Maximum gap in pixels that triggers extension.  Must be > 0.
             Comes from ``settings.cv_junction_extend_px`` (default 40, calibrated
             for ~2000 px normalised images).
+        adaptive_cap_enabled: Whether to apply the ADR-003 A2 adaptive cap.
+            Comes from ``settings.cv_wall_junction_extend_adaptive_enabled``.
 
     Returns:
         New list of Wall objects with the same length as *walls*.
@@ -1767,6 +1891,7 @@ def _extend_to_intersection(walls: list[Wall], extend_px: int) -> list[Wall]:
         [w.start[0], w.start[1], w.end[0], w.end[1]] for w in walls
     ]
 
+    capped_counter = [0]
     n = len(walls)
     for i in range(n):
         xi1, yi1, xi2, yi2 = coords[i]
@@ -1795,9 +1920,29 @@ def _extend_to_intersection(walls: list[Wall], extend_px: int) -> list[Wall]:
             iy = coords[h_idx][1]  # wall_h.start.y == wall_h.end.y
 
             # Extend H wall endpoints along x toward ix (axis=0).
-            _extend_wall_endpoint_to_value(coords[h_idx], 0, ix, extend_px)
+            _extend_wall_endpoint_to_value(
+                coords[h_idx],
+                0,
+                ix,
+                extend_px,
+                all_coords=coords,
+                self_idx=h_idx,
+                fixed_pos=coords[h_idx][1],
+                adaptive_cap_enabled=adaptive_cap_enabled,
+                capped_counter=capped_counter,
+            )
             # Extend V wall endpoints along y toward iy (axis=1).
-            _extend_wall_endpoint_to_value(coords[v_idx], 1, iy, extend_px)
+            _extend_wall_endpoint_to_value(
+                coords[v_idx],
+                1,
+                iy,
+                extend_px,
+                all_coords=coords,
+                self_idx=v_idx,
+                fixed_pos=coords[v_idx][0],
+                adaptive_cap_enabled=adaptive_cap_enabled,
+                capped_counter=capped_counter,
+            )
 
     extended: list[Wall] = [
         Wall(
@@ -1812,6 +1957,11 @@ def _extend_to_intersection(walls: list[Wall], extend_px: int) -> list[Wall]:
         "cv_junction_extend_to_intersection",
         extra={"walls_count": n, "extend_px": extend_px},
     )
+    if adaptive_cap_enabled:
+        _engine_logger.info(
+            "junction_extend_capped_count",
+            extra={"count": capped_counter[0]},
+        )
 
     return extended
 
@@ -2683,7 +2833,11 @@ class OpenCVClassicEngine(GeometryEngine):
         # _extend_to_intersection (08-cv-xx) runs after snapping so walls are
         # exact H/V, and before fusion so coincident endpoints produce junctions.
         walls = _snap_walls_orthogonal(walls)
-        walls = _extend_to_intersection(walls, self._settings.cv_junction_extend_px)
+        walls = _extend_to_intersection(
+            walls,
+            self._settings.cv_junction_extend_px,
+            adaptive_cap_enabled=self._settings.cv_wall_junction_extend_adaptive_enabled,
+        )
         walls, self._junctions = _fuse_junctions(walls)
         # ---- 6c. Diagonal residual filter, pass 2 (ADR-017) ------------
         # Re-filters by angle (Mec.1) and by minimum length for surviving
