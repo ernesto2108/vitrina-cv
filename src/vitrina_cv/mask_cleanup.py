@@ -25,10 +25,15 @@ AFTER binarisation and BEFORE HoughLinesP / CCA:
   Step 1 — ``remove_small_components``: CCA-based text/small-blob removal.
   Step 2 — ``retain_rectilinear``: directional morphological open that kills
             diagonal strokes while preserving H/V wall runs.
-  Step 3 — ``crop_to_main_component``: zeros everything outside the bbox
-            of the largest connected component (+ configurable margin).
-            Running this before step 4 keeps the exterior perimeter connected,
-            so the thin-stroke filter never fragments it.
+  Step 3 — ``crop_to_main_component``: zeros everything outside the envelope
+            (union of bounding boxes) of all "significant" connected
+            components — the largest one plus any other whose area is at
+            least CV_CLEANUP_CROP_MIN_AREA_RATIO of it (ADR-015) — expanded
+            by a configurable margin. This preserves non-contiguous
+            footprints (e.g. a detached garage/wing) while still discarding
+            small stray components (cotas, scan-border fragments). Running
+            this before step 4 keeps the exterior perimeter connected, so
+            the thin-stroke filter never fragments it.
   Step 4 — ``filter_thin_strokes``: bounded geodesic reconstruction from
             thick-stroke seeds; cota lines, furniture contours and stair
             lines disappear; actual wall strokes (thick cores + bounded
@@ -249,26 +254,43 @@ def filter_thin_strokes(
 def crop_to_main_component(
     mask: NDArray[np.uint8],
     margin_px: int,
+    min_area_ratio: float = 1.0,
 ) -> tuple[NDArray[np.uint8], tuple[int, int, int, int] | None]:
-    """Zero out everything outside the bbox of the largest connected component.
+    """Zero out everything outside the envelope of the significant components.
 
     Identifies the connected component with the greatest pixel area (normally
-    the exterior loop of the floor plan walls), computes its bounding box,
-    expands it by *margin_px* on all sides (clamped to image bounds), and
-    sets all pixels outside this expanded box to zero.
+    the exterior loop of the floor plan walls) and, per ADR-015, also treats
+    as "significant" any other component whose area is at least
+    *min_area_ratio* of that largest area (e.g. a detached wing/garage
+    separated from the main body by a gap). The crop bbox is the union
+    (envelope) of the bounding boxes of all significant components, expanded
+    by *margin_px* on all sides and clamped to image bounds. All pixels
+    outside this expanded envelope are set to zero.
 
     This eliminates perimeter cota/dimension lines and scan-border frames
-    that survive steps 1 and 2 because they are long H/V strokes.
+    that survive steps 1 and 2 because they are long H/V strokes, while
+    preserving non-contiguous floor plan footprints (L-shaped plans, garages
+    separated from the main block).
+
+    Compatibility invariant: when only one component qualifies as
+    significant, the envelope equals exactly the bbox of the largest
+    component — identical behavior to the pre-ADR-015 single-component crop.
 
     Args:
         mask: Binary uint8 mask (walls = 255).
-        margin_px: Number of pixels to add on each side of the largest
-            component's bounding box.  Corresponds to CV_CLEANUP_CROP_MARGIN_PX.
+        margin_px: Number of pixels to add on each side of the envelope
+            bbox.  Corresponds to CV_CLEANUP_CROP_MARGIN_PX.
+        min_area_ratio: Minimum area, relative to the largest component's
+            area, for a secondary component to be considered significant
+            and included in the envelope.  Corresponds to
+            CV_CLEANUP_CROP_MIN_AREA_RATIO.  Default 1.0 preserves the
+            legacy single-component behavior (only the largest qualifies,
+            since no other component can have area >= A_max unless tied).
 
     Returns:
         ``(cropped_mask, bbox)`` where *bbox* is ``(x, y, w, h)`` of the
-        expanded bounding box in pixel coordinates, or ``None`` if no
-        foreground component was found (mask is empty).
+        expanded envelope bounding box in pixel coordinates, or ``None`` if
+        no foreground component was found (mask is empty).
     """
     img_h, img_w = mask.shape[:2]
 
@@ -280,29 +302,140 @@ def crop_to_main_component(
         return mask.copy(), None
 
     # Find the component with the largest area (label 0 is background — skip).
-    best_label = 1
-    best_area = int(stats[1, cv2.CC_STAT_AREA])
-    for label in range(2, num_labels):
-        area = int(stats[label, cv2.CC_STAT_AREA])
-        if area > best_area:
-            best_area = area
-            best_label = label
+    areas = stats[1:num_labels, cv2.CC_STAT_AREA]
+    best_area = int(areas.max())
 
-    x = int(stats[best_label, cv2.CC_STAT_LEFT])
-    y = int(stats[best_label, cv2.CC_STAT_TOP])
-    w = int(stats[best_label, cv2.CC_STAT_WIDTH])
-    h = int(stats[best_label, cv2.CC_STAT_HEIGHT])
+    # Significant components: area >= min_area_ratio * A_max (ADR-015).
+    # The largest component always qualifies (its own ratio is 1.0).
+    area_threshold = min_area_ratio * best_area
+    significant_labels = [
+        label
+        for label in range(1, num_labels)
+        if stats[label, cv2.CC_STAT_AREA] >= area_threshold
+    ]
+
+    lefts = stats[significant_labels, cv2.CC_STAT_LEFT]
+    tops = stats[significant_labels, cv2.CC_STAT_TOP]
+    rights = lefts + stats[significant_labels, cv2.CC_STAT_WIDTH]
+    bottoms = tops + stats[significant_labels, cv2.CC_STAT_HEIGHT]
+
+    x = int(lefts.min())
+    y = int(tops.min())
+    x_right = int(rights.max())
+    y_bottom = int(bottoms.max())
 
     # Expand by margin, clamped to image bounds.
     x0 = max(0, x - margin_px)
     y0 = max(0, y - margin_px)
-    x1 = min(img_w, x + w + margin_px)
-    y1 = min(img_h, y + h + margin_px)
+    x1 = min(img_w, x_right + margin_px)
+    y1 = min(img_h, y_bottom + margin_px)
 
     out: NDArray[np.uint8] = np.zeros_like(mask)
     out[y0:y1, x0:x1] = mask[y0:y1, x0:x1]
 
     return out, (x0, y0, x1 - x0, y1 - y0)
+
+
+def _count_significant_components(
+    mask: NDArray[np.uint8], min_area_ratio: float
+) -> int:
+    """Count connected components considered "significant" per ADR-015.
+
+    Mirrors the significance test in ``crop_to_main_component`` (area >=
+    min_area_ratio * largest_area) without mutating the mask. Used only for
+    diagnostic logging (ADR-016) — never changes cleanup behavior.
+
+    Args:
+        mask: Binary uint8 mask (walls = 255).
+        min_area_ratio: Same meaning as in ``crop_to_main_component``.
+
+    Returns:
+        Number of significant components, or 0 if the mask is empty.
+    """
+    num_labels, _labels, stats, _ = cv2.connectedComponentsWithStats(
+        mask, connectivity=8
+    )
+    if num_labels <= 1:  # only background
+        return 0
+
+    areas = stats[1:num_labels, cv2.CC_STAT_AREA]
+    best_area = int(areas.max())
+    area_threshold = min_area_ratio * best_area
+    return int(np.count_nonzero(areas >= area_threshold))
+
+
+def _log_cleanup_step1(removed_count: int) -> None:
+    """Emit the step1 diagnostic log shared by clean_mask and its steps-1-3 variant."""
+    _logger.info(
+        "cv_cleanup_step1_small_components",
+        extra={"removed_count": removed_count},
+    )
+
+
+def _resolve_rectilinear_len_px(cleaned: NDArray[np.uint8], settings: Settings) -> int:
+    """Compute the adaptive rectilinear kernel length per ADR-014's formula."""
+    img_h, img_w = cleaned.shape[:2]
+    return max(
+        settings.cv_cleanup_rectilinear_min_len_px,
+        round(
+            float(
+                settings.cv_cleanup_rectilinear_len_px
+                * min(img_h, img_w)
+                / max(1, settings.cv_upscale_target_px)
+            )
+        ),
+    )
+
+
+def _log_cleanup_step2(
+    *,
+    branch: str,
+    long_side: int,
+    min_hw: int,
+    upscale_target_px: int,
+    rectilinear_len_px_used: int | None,
+    min_len_px: int,
+) -> None:
+    """Emit the step2 diagnostic log shared by clean_mask and its steps-1-3 variant.
+
+    ``branch`` is a canonical closed-set value (ADR-016): "fixed" | "adaptive" | "skip".
+    """
+    _logger.info(
+        "cv_cleanup_step2_rectilinear",
+        extra={
+            "branch": branch,
+            "long_side": long_side,
+            "min_hw": min_hw,
+            "upscale_target_px": upscale_target_px,
+            "rectilinear_len_px_used": rectilinear_len_px_used,
+            "min_len_px": min_len_px,
+        },
+    )
+
+
+def _log_cleanup_step3(
+    pre_crop_mask: NDArray[np.uint8],
+    bbox: tuple[int, int, int, int] | None,
+    min_area_ratio: float,
+) -> None:
+    """Emit the step3 diagnostic log shared by clean_mask and its steps-1-3 variant.
+
+    ``pre_crop_mask`` must be the mask *before* cropping (the one passed into
+    ``crop_to_main_component``), so the significance count reflects the same
+    components the crop actually considered.
+    """
+    significant_components_count = (
+        _count_significant_components(pre_crop_mask, min_area_ratio)
+        if bbox is not None
+        else 0
+    )
+    _logger.info(
+        "cv_cleanup_step3_crop",
+        extra={
+            "significant_components_count": significant_components_count,
+            "crop_bbox_xywh": bbox,
+        },
+    )
 
 
 def filter_interior_components(
@@ -441,10 +574,7 @@ def clean_mask(
     cleaned, removed_count = remove_small_components(
         mask, settings.cv_cleanup_text_max_side_px
     )
-    _logger.info(
-        "cv_cleanup_step1_small_components",
-        extra={"removed_count": removed_count},
-    )
+    _log_cleanup_step1(removed_count)
 
     # Compute resolution scale once — used by steps 2 and 4.
     # The scale is capped at CV_CLEANUP_RECTILINEAR_MAX_RES_SCALE (default 1.0)
@@ -463,50 +593,45 @@ def clean_mask(
     # plans (e.g. 300 px/m synthetic plans), which breaks room-boundary closure
     # without yielding meaningful hatch-removal benefit (thick-wall plans rarely
     # use dense diagonal hatching).
+    img_h, img_w = cleaned.shape[:2]
     if resolution_scale_raw <= settings.cv_cleanup_rectilinear_max_res_scale:
-        # Standard resolution: use the fixed configured kernel length.
-        rectilinear_len_px_used = settings.cv_cleanup_rectilinear_len_px
+        # Standard/low resolution: use the adaptive kernel (ADR-014) so the
+        # 150 px base length is not applied at full size to images smaller
+        # than the upscale target — it erodes valid H/V corners/runs.
+        # Formula: max(min_len, round(base_len * min(h,w) / upscale_target_px))
+        rectilinear_len_px_used = _resolve_rectilinear_len_px(cleaned, settings)
         cleaned = retain_rectilinear(cleaned, rectilinear_len_px_used)
-        _logger.info(
-            "cv_cleanup_step2_rectilinear",
-            extra={
-                "resolution_scale": round(resolution_scale_raw, 3),
-                "applied": True,
-                "rectilinear_len_px_used": rectilinear_len_px_used,
-            },
+        _log_cleanup_step2(
+            branch="fixed",
+            long_side=long_side_raw,
+            min_hw=min(img_h, img_w),
+            upscale_target_px=settings.cv_upscale_target_px,
+            rectilinear_len_px_used=rectilinear_len_px_used,
+            min_len_px=settings.cv_cleanup_rectilinear_min_len_px,
         )
     elif settings.cv_cleanup_rectilinear_adaptive_enabled:
         # F2 (08-cv-03) — high-res adaptive mode: scale the kernel proportionally
         # so diagonal hatching is suppressed even in native high-res images.
-        # Formula: max(50, round(base_len * min(h,w) / upscale_target_px))
-        img_h, img_w = cleaned.shape[:2]
-        rectilinear_len_px_used = max(
-            50,
-            round(
-                settings.cv_cleanup_rectilinear_len_px
-                * min(img_h, img_w)
-                / max(1, settings.cv_upscale_target_px)
-            ),
-        )
+        # Formula: max(min_len, round(base_len * min(h,w) / upscale_target_px))
+        rectilinear_len_px_used = _resolve_rectilinear_len_px(cleaned, settings)
         cleaned = retain_rectilinear(cleaned, rectilinear_len_px_used)
-        _logger.info(
-            "cv_cleanup_step2_rectilinear",
-            extra={
-                "resolution_scale": round(resolution_scale_raw, 3),
-                "applied": True,
-                "adaptive": True,
-                "rectilinear_len_px_used": rectilinear_len_px_used,
-            },
+        _log_cleanup_step2(
+            branch="adaptive",
+            long_side=long_side_raw,
+            min_hw=min(img_h, img_w),
+            upscale_target_px=settings.cv_upscale_target_px,
+            rectilinear_len_px_used=rectilinear_len_px_used,
+            min_len_px=settings.cv_cleanup_rectilinear_min_len_px,
         )
     else:
         # Legacy skip: high-res image and adaptive flag off — no-op (AC-6/pre-08).
-        _logger.info(
-            "cv_cleanup_step2_rectilinear",
-            extra={
-                "resolution_scale": round(resolution_scale_raw, 3),
-                "applied": False,
-                "rectilinear_len_px_used": None,
-            },
+        _log_cleanup_step2(
+            branch="skip",
+            long_side=long_side_raw,
+            min_hw=min(img_h, img_w),
+            upscale_target_px=settings.cv_upscale_target_px,
+            rectilinear_len_px_used=None,
+            min_len_px=settings.cv_cleanup_rectilinear_min_len_px,
         )
 
     # Step 3 — crop to main component
@@ -515,12 +640,14 @@ def clean_mask(
     # filter could fragment the perimeter at thin junctions, causing crop to
     # select only a small wall segment as the "largest component".
     if settings.cv_cleanup_crop_enabled:
+        pre_crop_cleaned = cleaned
         cleaned, bbox = crop_to_main_component(
-            cleaned, settings.cv_cleanup_crop_margin_px
+            cleaned,
+            settings.cv_cleanup_crop_margin_px,
+            settings.cv_cleanup_crop_min_area_ratio,
         )
-        _logger.info(
-            "cv_cleanup_step3_crop",
-            extra={"crop_bbox_xywh": bbox},
+        _log_cleanup_step3(
+            pre_crop_cleaned, bbox, settings.cv_cleanup_crop_min_area_ratio
         )
 
     # Step 4 — thin-stroke filter (removes cota lines, furniture, stair lines)
@@ -585,29 +712,61 @@ def clean_mask_steps_1_to_3(
         return mask.copy()
 
     # Step 1 — text / small-component removal
-    cleaned, _ = remove_small_components(mask, settings.cv_cleanup_text_max_side_px)
+    cleaned, removed_count = remove_small_components(
+        mask, settings.cv_cleanup_text_max_side_px
+    )
+    _log_cleanup_step1(removed_count)
 
     # Step 2 — diagonal hatching removal (conditional on resolution scale cap)
     img_h_raw, img_w_raw = cleaned.shape[:2]
     long_side_raw = max(img_h_raw, img_w_raw)
     resolution_scale_raw = long_side_raw / max(1, settings.cv_upscale_target_px)
+    img_h, img_w = cleaned.shape[:2]
     if resolution_scale_raw <= settings.cv_cleanup_rectilinear_max_res_scale:
-        cleaned = retain_rectilinear(cleaned, settings.cv_cleanup_rectilinear_len_px)
+        # Adaptive kernel (ADR-014) — mirrors the high-res branch below.
+        adaptive_len_px = _resolve_rectilinear_len_px(cleaned, settings)
+        cleaned = retain_rectilinear(cleaned, adaptive_len_px)
+        _log_cleanup_step2(
+            branch="fixed",
+            long_side=long_side_raw,
+            min_hw=min(img_h, img_w),
+            upscale_target_px=settings.cv_upscale_target_px,
+            rectilinear_len_px_used=adaptive_len_px,
+            min_len_px=settings.cv_cleanup_rectilinear_min_len_px,
+        )
     elif settings.cv_cleanup_rectilinear_adaptive_enabled:
         # F2 (08-cv-03) — adaptive mode for high-res images (mirrors clean_mask).
-        img_h, img_w = cleaned.shape[:2]
-        adaptive_len_px = max(
-            50,
-            round(
-                settings.cv_cleanup_rectilinear_len_px
-                * min(img_h, img_w)
-                / max(1, settings.cv_upscale_target_px)
-            ),
-        )
+        adaptive_len_px = _resolve_rectilinear_len_px(cleaned, settings)
         cleaned = retain_rectilinear(cleaned, adaptive_len_px)
+        _log_cleanup_step2(
+            branch="adaptive",
+            long_side=long_side_raw,
+            min_hw=min(img_h, img_w),
+            upscale_target_px=settings.cv_upscale_target_px,
+            rectilinear_len_px_used=adaptive_len_px,
+            min_len_px=settings.cv_cleanup_rectilinear_min_len_px,
+        )
+    else:
+        # Legacy skip: high-res image and adaptive flag off — no-op (mirrors clean_mask).
+        _log_cleanup_step2(
+            branch="skip",
+            long_side=long_side_raw,
+            min_hw=min(img_h, img_w),
+            upscale_target_px=settings.cv_upscale_target_px,
+            rectilinear_len_px_used=None,
+            min_len_px=settings.cv_cleanup_rectilinear_min_len_px,
+        )
 
     # Step 3 — crop to main component
     if settings.cv_cleanup_crop_enabled:
-        cleaned, _ = crop_to_main_component(cleaned, settings.cv_cleanup_crop_margin_px)
+        pre_crop_cleaned = cleaned
+        cleaned, bbox = crop_to_main_component(
+            cleaned,
+            settings.cv_cleanup_crop_margin_px,
+            settings.cv_cleanup_crop_min_area_ratio,
+        )
+        _log_cleanup_step3(
+            pre_crop_cleaned, bbox, settings.cv_cleanup_crop_min_area_ratio
+        )
 
     return cleaned

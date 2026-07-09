@@ -155,6 +155,109 @@ class TestCropToMainComponent:
             "Empty mask should be returned unchanged"
         )
 
+    def test_ac4_secondary_wing_within_min_area_ratio_included_in_envelope(
+        self,
+    ) -> None:
+        """AC-4: main component + wing of 0.4*A_max area → both inside the envelope.
+
+        The wing is placed far from the main component (separated by a gap)
+        so that, without ADR-015's envelope-union behavior, it would fall
+        outside the main component's own bbox + margin and be zeroed.
+        """
+        mask = _empty_mask(500, 500)
+        # Main component: 100x100 = 10_000 px^2 (A_max).
+        main_h, main_w = 100, 100
+        _white(mask, 10, 10, main_h, main_w)
+        a_max = main_h * main_w
+
+        # Wing: area = 0.4 * A_max = 4_000 px^2 -> 40x100 rectangle placed far
+        # away (bottom-right), well outside main bbox + small margin.
+        wing_h, wing_w = 40, 100
+        assert wing_h * wing_w == int(0.4 * a_max)
+        _white(mask, 400, 380, wing_h, wing_w)
+
+        result, bbox = crop_to_main_component(mask, margin_px=5, min_area_ratio=0.4)
+
+        assert bbox is not None
+        # Both components must survive the crop (not zeroed).
+        assert result[10 : 10 + main_h, 10 : 10 + main_w].max() == WHITE, (
+            "Main component must be preserved"
+        )
+        assert result[400 : 400 + wing_h, 380 : 380 + wing_w].max() == WHITE, (
+            "Wing of 0.4*A_max must be included in the envelope, not zeroed"
+        )
+        # The envelope bbox must span both components (union), not just main.
+        x, y, w, h = bbox
+        assert x <= 10 - 5 or x == 0
+        assert y <= 10 - 5 or y == 0
+        assert x + w >= 380 + wing_w
+        assert y + h >= 400 + wing_h
+
+    def test_ac5_single_significant_component_envelope_equals_largest_bbox(
+        self,
+    ) -> None:
+        """AC-5: only one significant component -> envelope == bbox of the
+        largest component (compatibility invariant, no regression vs.
+        pre-ADR-015 behavior)."""
+        mask = _empty_mask(300, 300)
+        main_h, main_w = 80, 60
+        _white(mask, 20, 30, main_h, main_w)
+        margin_px = 7
+
+        result, bbox = crop_to_main_component(mask, margin_px=margin_px)
+
+        assert bbox is not None
+        x, y, w, h = bbox
+        expected_x = max(0, 30 - margin_px)
+        expected_y = max(0, 20 - margin_px)
+        expected_x2 = min(mask.shape[1], 30 + main_w + margin_px)
+        expected_y2 = min(mask.shape[0], 20 + main_h + margin_px)
+        assert (x, y, x + w, y + h) == (
+            expected_x,
+            expected_y,
+            expected_x2,
+            expected_y2,
+        ), "Envelope must equal bbox of the largest (and only) component"
+        assert result[20 : 20 + main_h, 30 : 30 + main_w].max() == WHITE
+
+    def test_ac6_small_component_below_min_area_ratio_excluded_from_envelope(
+        self,
+    ) -> None:
+        """AC-6: a small component (area = 0.02*A_max, simulating a cota/frame
+        stroke) stays outside the envelope and is zeroed out."""
+        mask = _empty_mask(500, 500)
+        main_h, main_w = 100, 100
+        _white(mask, 10, 10, main_h, main_w)
+        a_max = main_h * main_w
+
+        # Small component: area = 0.02 * A_max = 200 px^2 -> 4x50 rectangle,
+        # placed far from main so it would only be included if it qualified
+        # as significant.
+        small_h, small_w = 4, 50
+        assert small_h * small_w == int(0.02 * a_max)
+        small_pos = 450
+        _white(mask, small_pos, small_pos, small_h, small_w)
+
+        result, bbox = crop_to_main_component(mask, margin_px=5, min_area_ratio=0.4)
+
+        assert bbox is not None
+        assert result[10 : 10 + main_h, 10 : 10 + main_w].max() == WHITE, (
+            "Main component must be preserved"
+        )
+        assert (
+            result[
+                small_pos : small_pos + small_h, small_pos : small_pos + small_w
+            ].max()
+            == 0
+        ), "Component of 0.02*A_max (below min_area_ratio) must be zeroed"
+        x, y, w, h = bbox
+        assert x + w < small_pos, (
+            "Envelope must not extend to include the small component"
+        )
+        assert y + h < small_pos, (
+            "Envelope must not extend to include the small component"
+        )
+
 
 # ---------------------------------------------------------------------------
 # clean_mask — integration of pipeline steps 1→2→3

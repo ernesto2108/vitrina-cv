@@ -24,6 +24,7 @@ from vitrina_cv.config.settings import Settings
 from vitrina_cv.engines.opencv_classic import (
     _consolidate_walls,
     _detect_openings,
+    _extend_to_intersection,
     _fuse_junctions,
     _snap_walls_orthogonal,
 )
@@ -460,4 +461,183 @@ class TestDetectOpeningsRegression:
 
         assert len(after) >= len(before), (
             f"Openings lost after fusion: before={len(before)}, after={len(after)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# _extend_to_intersection
+# ---------------------------------------------------------------------------
+
+
+class TestExtendToIntersection:
+    """Unit tests for _extend_to_intersection (task 08-cv-*).
+
+    All tests use exact H/V walls (post-snap convention).
+    Intersection = (v_wall.x, h_wall.y).
+    """
+
+    # ------------------------------------------------------------------
+    # Case 1: L-corner — both endpoints short, gap < extend_px → both extend
+    # ------------------------------------------------------------------
+
+    def test_extend_to_intersection_l_corner_gap_under_threshold(self) -> None:
+        """L-corner: h_wall and v_wall each 30 px short, extend_px=40 → both reach intersection."""
+        # Intersection at (100, 100).
+        # h_wall ends at x=70  → gap = 30 ≤ 40 → should extend to x=100
+        # v_wall ends at y=70  → gap = 30 ≤ 40 → should extend to y=100
+        h_wall = _h_wall(10.0, 70.0, 100.0, thickness=12.0)
+        v_wall = _v_wall(10.0, 70.0, 100.0, thickness=12.0)
+
+        result = _extend_to_intersection([h_wall, v_wall], extend_px=40)
+
+        expected_count = 2
+        assert len(result) == expected_count
+        # h_wall: the rightmost x must now reach ix=100
+        h_out = result[0]
+        assert max(h_out.start[0], h_out.end[0]) == pytest.approx(100.0, abs=1e-6)
+        # v_wall: the bottommost y must now reach iy=100
+        v_out = result[1]
+        assert max(v_out.start[1], v_out.end[1]) == pytest.approx(100.0, abs=1e-6)
+
+    # ------------------------------------------------------------------
+    # Case 2: T-corner — long wall covers intersection; only short extends
+    # ------------------------------------------------------------------
+
+    def test_extend_to_intersection_t_corner_only_short_wall_moves(self) -> None:
+        """T-corner: long H wall covers ix in interior; only the short V wall extends."""
+        # h_wall spans x=0..200, y=100  → ix=100 is interior, must not change
+        # v_wall ends at y=75, x=100   → gap = 100-75 = 25 ≤ 40 → should extend to y=100
+        h_wall = _h_wall(0.0, 200.0, 100.0, thickness=10.0)
+        v_wall = _v_wall(10.0, 75.0, 100.0, thickness=10.0)
+
+        result = _extend_to_intersection([h_wall, v_wall], extend_px=40)
+
+        h_out = result[0]
+        v_out = result[1]
+
+        # H wall endpoints must be unchanged (intersection is in its interior)
+        assert h_out.start[0] == pytest.approx(0.0, abs=1e-6)
+        assert h_out.end[0] == pytest.approx(200.0, abs=1e-6)
+
+        # V wall: bottommost y must now be 100 (extended from 75)
+        assert max(v_out.start[1], v_out.end[1]) == pytest.approx(100.0, abs=1e-6)
+
+    # ------------------------------------------------------------------
+    # Case 3: Gap > extend_px → no extension
+    # ------------------------------------------------------------------
+
+    def test_extend_to_intersection_gap_above_threshold_no_change(self) -> None:
+        """Gap of 50 px > extend_px=40 → output identical to input."""
+        # Intersection at (100, 100).
+        # h_wall ends at x=50 → gap = 50 > 40 → must NOT extend
+        # v_wall ends at y=50 → gap = 50 > 40 → must NOT extend
+        h_wall = _h_wall(10.0, 50.0, 100.0, thickness=8.0)
+        v_wall = _v_wall(10.0, 50.0, 100.0, thickness=8.0)
+
+        result = _extend_to_intersection([h_wall, v_wall], extend_px=40)
+
+        h_out, v_out = result[0], result[1]
+        assert h_out.start == h_wall.start
+        assert h_out.end == h_wall.end
+        assert v_out.start == v_wall.start
+        assert v_out.end == v_wall.end
+
+    # ------------------------------------------------------------------
+    # Case 4: Parallel pairs — no extension
+    # ------------------------------------------------------------------
+
+    def test_extend_to_intersection_parallel_pairs_not_touched(self) -> None:
+        """Two H walls (parallel pair) must not be extended."""
+        h_wall1 = _h_wall(10.0, 70.0, 100.0, thickness=10.0)
+        h_wall2 = _h_wall(10.0, 70.0, 150.0, thickness=10.0)
+
+        result = _extend_to_intersection([h_wall1, h_wall2], extend_px=40)
+
+        assert result[0].start == h_wall1.start
+        assert result[0].end == h_wall1.end
+        assert result[1].start == h_wall2.start
+        assert result[1].end == h_wall2.end
+
+    # ------------------------------------------------------------------
+    # Case 5: Idempotence — endpoints already at intersection → no change
+    # ------------------------------------------------------------------
+
+    def test_extend_to_intersection_idempotent_when_gaps_are_zero(self) -> None:
+        """Endpoints already touching the intersection → output identical to input (plan-004)."""
+        # Intersection at (100, 100). Both walls already reach it exactly.
+        h_wall = _h_wall(10.0, 100.0, 100.0, thickness=10.0)
+        v_wall = _v_wall(10.0, 100.0, 100.0, thickness=10.0)
+
+        result = _extend_to_intersection([h_wall, v_wall], extend_px=40)
+
+        assert result[0].start == h_wall.start
+        assert result[0].end == h_wall.end
+        assert result[1].start == v_wall.start
+        assert result[1].end == v_wall.end
+
+    # ------------------------------------------------------------------
+    # Case 6: Prolongation vs interior (AC-07)
+    # ------------------------------------------------------------------
+
+    def test_extend_to_intersection_interior_endpoint_not_shortened(self) -> None:
+        """H wall that covers ix in its interior must not be altered (AC-07)."""
+        # h_wall: x=0..200, y=100 — ix=100 is interior
+        # v_wall: x=100, y=10..80 — gap to iy=100 is 20 ≤ 40 → V extends
+        h_wall = _h_wall(0.0, 200.0, 100.0, thickness=10.0)
+        v_wall = _v_wall(10.0, 80.0, 100.0, thickness=10.0)
+
+        result = _extend_to_intersection([h_wall, v_wall], extend_px=40)
+
+        h_out, v_out = result[0], result[1]
+
+        # H must be completely unchanged
+        assert h_out.start[0] == pytest.approx(0.0)
+        assert h_out.end[0] == pytest.approx(200.0)
+        assert h_out.start[1] == pytest.approx(100.0)
+        assert h_out.end[1] == pytest.approx(100.0)
+
+        # V must have its bottom endpoint moved to iy=100
+        assert max(v_out.start[1], v_out.end[1]) == pytest.approx(100.0, abs=1e-6)
+
+    # ------------------------------------------------------------------
+    # Case 7: Cardinality and thickness preserved
+    # ------------------------------------------------------------------
+
+    def test_extend_to_intersection_cardinality_and_thickness_preserved(self) -> None:
+        """N walls in → N walls out; thickness of each wall is unchanged."""
+        walls = [
+            _h_wall(0.0, 60.0, 100.0, thickness=5.0),
+            _v_wall(0.0, 60.0, 100.0, thickness=7.0),
+            _h_wall(0.0, 80.0, 200.0, thickness=None),
+            _v_wall(0.0, 80.0, 200.0, thickness=15.0),
+            _h_wall(50.0, 120.0, 300.0, thickness=9.0),
+        ]
+
+        result = _extend_to_intersection(walls, extend_px=40)
+
+        assert len(result) == len(walls), (
+            f"Cardinality changed: in={len(walls)}, out={len(result)}"
+        )
+        for original, out_wall in zip(walls, result, strict=True):
+            assert out_wall.thickness == original.thickness, (
+                f"thickness changed: expected {original.thickness}, got {out_wall.thickness}"
+            )
+
+    # ------------------------------------------------------------------
+    # Case 8: Integration snap → extend → fuse produces junction
+    # ------------------------------------------------------------------
+
+    def test_extend_to_intersection_integration_with_fuse_junctions(self) -> None:
+        """After extend, gap is ~0 → _fuse_junctions must produce ≥1 junction."""
+        # h_wall ends at x=70, v_wall ends at y=70; intersection=(100, 100).
+        # Gap=30 < extend_px=40 → both endpoints move to (100, 100).
+        thickness = 20.0
+        h_wall = _h_wall(10.0, 70.0, 100.0, thickness=thickness)
+        v_wall = _v_wall(10.0, 70.0, 100.0, thickness=thickness)
+
+        extended = _extend_to_intersection([h_wall, v_wall], extend_px=40)
+        _, junctions = _fuse_junctions(extended)
+
+        assert len(junctions) >= 1, (
+            "Expected ≥1 junction after extend+fuse with gap=30px < extend_px=40"
         )

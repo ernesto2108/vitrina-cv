@@ -57,6 +57,8 @@ def _settings_step4_only(**kwargs) -> Settings:
         "cv_cleanup_enabled": True,
         "cv_cleanup_text_max_side_px": 5,  # tiny threshold -> step 1 kills nothing real
         "cv_cleanup_rectilinear_len_px": 5,  # tiny threshold -> step 2 kills nothing real
+        "cv_cleanup_rectilinear_min_len_px": 5,  # match len_px so the adaptive floor
+        # (ADR-014) does not dominate over this tiny threshold -> step 2 kills nothing real
         "cv_cleanup_crop_enabled": False,  # disable crop so mask geometry stays simple
         "cv_cleanup_thickness_filter_enabled": True,
         "cv_cleanup_min_wall_thickness_px": 6,
