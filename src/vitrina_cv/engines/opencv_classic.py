@@ -1696,16 +1696,19 @@ def _nearest_perpendicular_wall_distance(
     fixed_pos: float,
     from_value: float,
     target: float,
+    *,
+    pair_idx: int = -1,
 ) -> float | None:
     """Find the distance to the nearest perpendicular wall along the extension path.
 
     Used by the adaptive junction-extend cap (ADR-003, part A2): when
     extending a wall endpoint toward *target*, this checks whether some
-    *other* orthogonal wall crosses the line ``fixed_pos`` (the wall being
-    extended's non-varying coordinate) strictly between *from_value* and
-    *target*. If one does, its crossing point limits how far the extension
-    may legitimately go — extending past it would cross into a neighbouring
-    room instead of closing a real corner gap.
+    *other* orthogonal wall (distinct from the one that originated *target*,
+    see *pair_idx*) crosses the line ``fixed_pos`` (the wall being extended's
+    non-varying coordinate) strictly between *from_value* and *target*. If
+    one does, its crossing point limits how far the extension may
+    legitimately go — extending past it would cross into a neighbouring room
+    instead of closing a real corner gap.
 
     Args:
         coords: Mutable per-wall ``[x1, y1, x2, y2]`` coordinate lists.
@@ -1719,16 +1722,20 @@ def _nearest_perpendicular_wall_distance(
             candidate extension range, exclusive).
         target: The intersection coordinate along *axis* (end of the
             candidate extension range).
+        pair_idx: Index of the orthogonal wall whose intersection produced
+            *target*. Excluded from the search — that wall reaching exactly
+            the geometric corner is the expected, legitimate case this
+            extension is meant to close, not an invasion to cap against.
 
     Returns:
         The nearest crossing coordinate strictly between *from_value* and
-        *target* (exclusive of *from_value*), or ``None`` if no perpendicular
-        wall crosses within that open range.
+        *target* (exclusive of both endpoints), or ``None`` if no third
+        perpendicular wall crosses within that open range.
     """
     lo, hi = (from_value, target) if from_value <= target else (target, from_value)
     best: float | None = None
     for k, other in enumerate(coords):
-        if k == self_idx:
+        if k in (self_idx, pair_idx):
             continue
         ox1, oy1, ox2, oy2 = other
         other_is_h = oy1 == oy2
@@ -1768,6 +1775,7 @@ def _extend_wall_endpoint_to_value(
     *,
     all_coords: list[list[float]] | None = None,
     self_idx: int = -1,
+    pair_idx: int = -1,
     fixed_pos: float = 0.0,
     adaptive_cap_enabled: bool = False,
     capped_counter: list[int] | None = None,
@@ -1791,6 +1799,9 @@ def _extend_wall_endpoint_to_value(
         extend_px: Maximum gap (px) that triggers extension.
         all_coords: All walls' coordinate lists, for the adaptive cap search.
         self_idx: Index of this wall within *all_coords*.
+        pair_idx: Index of the orthogonal wall whose intersection produced
+            *target* — excluded from the adaptive cap search (see
+            ``_nearest_perpendicular_wall_distance``).
         fixed_pos: The constant coordinate of this wall (y for H, x for V).
         adaptive_cap_enabled: Whether to apply the adaptive cap.
         capped_counter: Single-element mutable list used as an int accumulator.
@@ -1805,7 +1816,13 @@ def _extend_wall_endpoint_to_value(
         if not adaptive_cap_enabled or all_coords is None:
             return raw_target
         nearest = _nearest_perpendicular_wall_distance(
-            all_coords, self_idx, axis, fixed_pos, from_value, raw_target
+            all_coords,
+            self_idx,
+            axis,
+            fixed_pos,
+            from_value,
+            raw_target,
+            pair_idx=pair_idx,
         )
         if nearest is None:
             return raw_target
@@ -1927,6 +1944,7 @@ def _extend_to_intersection(
                 extend_px,
                 all_coords=coords,
                 self_idx=h_idx,
+                pair_idx=v_idx,
                 fixed_pos=coords[h_idx][1],
                 adaptive_cap_enabled=adaptive_cap_enabled,
                 capped_counter=capped_counter,
@@ -1939,6 +1957,7 @@ def _extend_to_intersection(
                 extend_px,
                 all_coords=coords,
                 self_idx=v_idx,
+                pair_idx=h_idx,
                 fixed_pos=coords[v_idx][0],
                 adaptive_cap_enabled=adaptive_cap_enabled,
                 capped_counter=capped_counter,
