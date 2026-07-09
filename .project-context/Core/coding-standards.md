@@ -3,7 +3,7 @@
 <!-- Naming, estructura de carpetas, idioma del código, reglas de linting y patrones prohibidos.
      Complementado con patrones de diseño detectados automáticamente en el código. -->
 
-last_updated: 2026-07-02
+last_updated: 2026-07-08
 
 ## Idioma del código
 
@@ -113,6 +113,13 @@ Comandos:
 - **Cuándo usar:** extraer regiones interiores cerradas como polígonos simplificados
 - **Anti-pattern:** epsilon fijo en píxeles (no escala); usar esqueleto (requiere opencv-contrib)
 
+### Crop a envolvente multi-componente (ADR-015) — mask_cleanup.py
+- **Archivo:** `src/vitrina_cv/mask_cleanup.py::crop_to_main_component` (paso 3 de `clean_mask`)
+- **Qué hace:** en vez de recortar solo al bbox del componente conexo mayor, calcula `A_max` y considera "significativo" todo componente con `area >= min_area_ratio * A_max`; recorta a la **unión de bboxes** (envolvente) de todos los significativos + margen, clampeado a límites de imagen. Preserva footprints no contiguos (alas/cocheras separadas) sin romper los supuestos de Hough/CCA downstream (la máscara resultante sigue siendo una sola caja rectangular).
+- **Invariante de compatibilidad:** parámetro `min_area_ratio` default `1.0` en la función (solo el mayor califica) — el caller de producción siempre pasa `settings.cv_cleanup_crop_min_area_ratio` (default `0.05`, CV09-01). Con un solo componente significativo, la envolvente == bbox del mayor (no-op, sin regresión).
+- **Cuándo usar:** al tocar el paso 3 del pipeline de limpieza de máscara o al calibrar el ratio de área mínimo.
+- **Anti-pattern:** implementar la variante "por-componente" (fusionar bboxes individuales sin envolvente única) — es un fallback condicional de ADR-015, no forma parte del contrato actual salvo que el gate de regresión (CV09-11) lo exija.
+
 ### Intermedios reutilizables en instancia de engine
 - **Archivo:** `src/vitrina_cv/engines/opencv_classic.py`
 - **Qué hace:** `_wall_mask`, `_gray`, `_junctions` y `_pre_filter_mask` en la instancia tras cada `extract()` para que tareas posteriores reutilicen intermedios costosos sin repetirlos; NO forman parte del contrato `GeometryEngine`. `_pre_filter_mask` (07-cv-06) = máscara post steps 1-3 de cleanup, pre step 4 — conserva líneas delgadas de ventanas vectoriales.
@@ -167,14 +174,15 @@ Comandos:
 - **Logs emitidos:** `walls_before_consolidation` y `walls_after_consolidation` con `walls_count`.
 - **Anti-pattern:** pasar walls raw a `_detect_openings` sin consolidar; emitir `Wall.thickness` en metros (el consumidor Go lo convierte con `thickness_px * metersPerPx`; emitir metros causa doble conversión).
 
-### _snap_walls_orthogonal + _fuse_junctions — snapping H/V y fusión de junctions (07-cv-04) — engines/opencv_classic.py
+### _snap_walls_orthogonal + _extend_to_intersection + _fuse_junctions — F4 (07-cv-04 / 08-cv-xx) — engines/opencv_classic.py
 - **Archivo:** `src/vitrina_cv/engines/opencv_classic.py`
-- **Cuándo en el pipeline:** paso 6b de `extract()`, inmediatamente después de `_consolidate_walls` y antes de la detección de rooms.
+- **Cuándo en el pipeline:** paso 6b de `extract()`, inmediatamente después de `_consolidate_walls` y antes de la detección de rooms. Orden: snap → extend → fuse.
 - **_snap_walls_orthogonal:** para cada `Wall`, calcula el ángulo del segmento. Si `|angle| < _SNAP_ANGLE_TOL_DEG=5°` → fuerza horizontal (`start.y = end.y = mean(y1,y2)`). Si `|90° - angle| < 5°` → fuerza vertical (`start.x = end.x = mean(x1,x2)`). Si > 5° del eje más cercano → wall intacto (diagonal legítimo).
+- **_extend_to_intersection (08-cv-xx / ADR-013):** para cada par (H, V), calcula la intersección geométrica `(ix, iy)`. Mueve el endpoint del muro H hacia `ix` (y el del muro V hacia `iy`) solo si: (a) el gap ≤ `cv_junction_extend_px` Y (b) la intersección cae en la prolongación del segmento (fuera de su extensión actual). Función pura, misma cardinalidad. Helper auxiliar: `_extend_wall_endpoint_to_value(coords, axis, target, extend_px)` para mantener el branch count bajo PLR0912. Idempotente: gaps ≈ 0 → sin cambio.
 - **_fuse_junctions:** para cada par de endpoints de muros distintos, si la distancia euclídea < `min(t_i, t_j)` (fallback `_WALL_THICKNESS_EST_PX=10` cuando `thickness=None`), fusiona ambos al centroide del cluster vía Union-Find. Retorna `(walls_actualizados, junctions: list[Point])`.
 - **_junctions en el engine:** almacenados como `OpenCVClassicEngine._junctions: list[Point] | None` para consumo por cv-07 (detección de puertas en esquina). Patrón de intermedio reutilizable ya establecido con `_wall_mask` y `_gray`.
-- **Constantes:** `_SNAP_ANGLE_TOL_DEG=5.0`, `_JUNCTION_MIN_CLUSTER_SIZE=2`.
-- **Anti-pattern:** llamar antes de `_consolidate_walls` (las junctions deben operar sobre walls ya en centerline, no sobre los fragmentos Hough); exponer `_junctions` en la interfaz `GeometryEngine` o en el contrato REST (viola ADR-003).
+- **Constantes:** `_SNAP_ANGLE_TOL_DEG=5.0`, `_JUNCTION_MIN_CLUSTER_SIZE=2`. Setting: `cv_junction_extend_px=40`.
+- **Anti-pattern:** llamar antes de `_consolidate_walls`; exponer `_junctions` en la interfaz `GeometryEngine`; invertir el orden snap/extend/fuse; hardcodear el umbral de extensión (debe venir de settings).
 
 ### _detect_window_pattern — detección de ventanas por doble línea (07-cv-06) — engines/opencv_classic.py
 - **Archivo:** `src/vitrina_cv/engines/opencv_classic.py`
@@ -197,12 +205,15 @@ Comandos:
 - **Thresholds en Settings:** `CV_CLEANUP_TEXT_MAX_SIDE_PX=40`, `CV_CLEANUP_RECTILINEAR_LEN_PX=150`, `CV_CLEANUP_CROP_ENABLED=True`, `CV_CLEANUP_CROP_MARGIN_PX=20`, `CV_CLEANUP_THICKNESS_FILTER_ENABLED=True`, `CV_CLEANUP_MIN_WALL_THICKNESS_PX=6` (calibrado para 2000 px; auto-escalado), `CV_CLEANUP_THICKNESS_PRECLOSE_PX=9`.
 - **Orden obligatorio: 1 → 2 → 3(crop) → 4(filter).** Crop antes del filtro mantiene el perímetro exterior conectado; si se invierte el orden, el filtro fragmenta el perímetro y crop selecciona solo un stub de pared.
 - **Anti-pattern:** aplicar el cleanup antes del upscale; pasar la máscara limpiada al preflight (ADR-005); invertir el orden de crop y filter; hardcodear thresholds fuera de Settings.
+- **Logging simétrico (CV09-05 / ADR-016):** pasos 1-3 emiten INFO estructurado vía `extra={}`, compartido con `clean_mask_steps_1_to_3` mediante helpers `_log_cleanup_step1/2/3` — `cv_cleanup_step1_small_components` (`removed_count`); `cv_cleanup_step2_rectilinear` con `branch` canónico ∈ {`fixed`, `adaptive`, `skip`} + `long_side`, `min_hw`, `upscale_target_px`, `rectilinear_len_px_used`, `min_len_px`; `cv_cleanup_step3_crop` con `significant_components_count` (vía nuevo helper `_count_significant_components`, recalcula sobre la máscara PRE-crop) y `crop_bbox_xywh`. Paso 4 mantiene su log propio (`cv_cleanup_step4_thickness_filter`), no compartido.
+- **Anti-pattern (logging):** usar strings libres para `branch` en vez del conjunto cerrado {fixed|adaptive|skip}; calcular `significant_components_count` sobre la máscara ya recortada (post-crop) — debe ser sobre la máscara previa al crop para reflejar los componentes que `crop_to_main_component` realmente evaluó.
 
 ### clean_mask_steps_1_to_3 — máscara pre-filtro para detección de ventanas — mask_cleanup.py (07-cv-06)
 - **Archivo:** `src/vitrina_cv/mask_cleanup.py`
 - **Qué hace:** variante de `clean_mask` que ejecuta solo los pasos 1-3 (text removal, rectilinear, crop) sin el `filter_thin_strokes` de paso 4. Preserva líneas delgadas de doble trazo (ventanas vectoriales) que el paso 4 destruiría. Devuelve un `NDArray` (misma signatura que `clean_mask`, sin romper callers existentes).
 - **Cuándo usar:** en `OpenCVClassicEngine.extract()` paso 4b para producir `self._pre_filter_mask`; pasar esa máscara a `_detect_window_pattern`. NO usar para el pipeline principal de walls/rooms (usarlos requiere la máscara completa con step 4).
 - **Anti-pattern:** sustituir `clean_mask` por esta función en el pipeline principal — los trazos delgados de cotas/muebles contaminarían Hough y CCA.
+- **Logging simétrico (CV09-05 / ADR-016):** desde este run emite los mismos 3 eventos INFO de pasos 1-3 que `clean_mask` (ver entrada arriba) — antes de CV09-05 esta función no emitía ningún log, dejando ciega la ruta de detección de ventanas/escaleras (`_detect_window_pattern`, `_detect_stairs_candidates`). Cero cambio de comportamiento de máscara, verificado con test de identidad antes/después.
 
 ### filter_thin_strokes — filtro geodésico por grosor de trazo — mask_cleanup.py
 - **Archivo:** `src/vitrina_cv/mask_cleanup.py`
@@ -257,6 +268,32 @@ Comandos:
 - **Log emitido:** `stairs_candidates_count` con el conteo por corrida.
 - **Cuándo usar:** al ajustar umbrales de detección de escaleras; la función es el único punto de cambio. Llamar DESPUÉS de la detección de rooms (necesita los polígonos), ANTES de escala.
 - **Anti-pattern:** usar `_wall_mask` (post `filter_thin_strokes`) para stair detection — los peldaños habrán sido eliminados; llamar sin rooms disponibles (el anti-FP fallaría sin polígonos).
+
+### Nuevas env vars para fixes ADR-014/015/017 (CV09-01) — config/settings.py
+- **Archivo:** `src/vitrina_cv/config/settings.py`
+- **Qué hace:** agrega 3 campos `Field` siguiendo el patrón existente (default + validation + `description=` referenciando el ADR): `cv_cleanup_rectilinear_min_len_px` (int, `gt=0`, default 50 — reemplaza el literal 50 hardcodeado en el kernel adaptativo del paso 2 de cleanup, ADR-014), `cv_cleanup_crop_min_area_ratio` (float, `ge=0.0, le=1.0`, default 0.05 — ratio de área mínimo para componente significativo en crop multi-componente, ADR-015), `cv_wall_min_diagonal_len_px` (int, `gt=0`, default 40 — longitud euclidiana mínima para conservar un muro oblicuo residual, ADR-017 Mec.2).
+- **Cuándo usar:** las tasks de implementación de ADR-014/015/017 deben leer estos settings en vez de definir sus propios defaults.
+- **Anti-pattern:** hardcodear estos umbrales fuera de `Settings`.
+
+### _filter_diagonal_residual_pass2 — segundo pase del filtro diagonal (CV09-04 / ADR-017) — engines/opencv_classic.py
+- **Archivo:** `src/vitrina_cv/engines/opencv_classic.py`
+- **Cuándo en el pipeline:** paso 6c, inmediatamente después de `_fuse_junctions()` (después de snap → extend → fuse). Orden efectivo: `_consolidate_walls` (filtro banda pase 1) → `_snap_walls_orthogonal` → `_extend_to_intersection` → `_fuse_junctions` → `_filter_diagonal_residual_pass2` (pase 2).
+- **Qué hace:** doble mecanismo complementario al filtro de banda del pase 1, para eliminar el residual diagonal (stub de escalera/puerta) que sobrevive a snap/extend/fuse. **Mec.1 (ángulo):** re-evalúa el ángulo `atan2(|dy|,|dx|)` de cada `Wall` y descarta los que caen en la misma banda `[cv_wall_diagonal_filter_low_deg, cv_wall_diagonal_filter_high_deg]` del pase 1 — idempotente sobre muros ya snapeados a H/V exacto (ángulo 0°/90° nunca cae en banda). **Mec.2 (longitud):** descarta un `Wall` que (a) no es H/V exacto (`start.x != end.x` y `start.y != end.y`) **y** (b) tiene longitud euclidiana < `cv_wall_min_diagonal_len_px`; nunca se aplica a un muro H/V exacto sin importar su longitud.
+- **Gating:** ambos mecanismos comparten el master switch `cv_wall_diagonal_filter_enabled` (el mismo del pase 1). Con `False`, la función retorna la lista de entrada sin modificar (misma identidad de objeto) — compatibilidad byte-idéntica pre-run-08.
+- **Log emitido:** `cv_wall_diagonal_pass2_filtered` con `count_by_angle` y `count_by_length` como campos separados en `extra={}` (consumido por CV09-05 logging simétrico).
+- **Cuándo usar:** al ajustar la banda o el umbral de longitud del filtro diagonal; es el único punto de cambio para el pase 2. No confundir con el filtro de pase 1 dentro de `_consolidate_walls` (banda pre-snap).
+- **Anti-pattern:** llamar antes de `_fuse_junctions`; introducir una banda o flag nuevos en vez de reusar `cv_wall_diagonal_filter_low_deg/high_deg` y `cv_wall_diagonal_filter_enabled`; aplicar Mec.2 a un muro H/V exacto.
+
+### _sanitize_room_polygon — saneo de contorno de room (10-cv-01, ADR-001) — engines/opencv_classic.py
+- **Archivo:** `src/vitrina_cv/engines/opencv_classic.py`
+- **Cuándo en el pipeline:** dentro de `_detect_rooms`, inmediatamente después de `approxPolyDP` (paso 5), antes de emitir el `Room`.
+- **Qué hace:** elimina vértices espurios de un polígono de room cerrado cuando **ambas** aristas adyacentes caen en la misma banda diagonal `[cv_wall_diagonal_filter_low_deg, cv_wall_diagonal_filter_high_deg]` que usa el filtro de muros, y al menos una de las dos supera `cv_room_contour_diag_min_len_px`. Corre iterativamente (colapsar un vértice puede exponer otro espurio). Si tras el saneo queda una arista en banda por encima del umbral (no hay polígono ortogonal recuperable), la función retorna `None` y el room se descarta (AC-2).
+- **Helper de ángulo:** `_edge_angle_deg(p1, p2)` — misma convención `atan2(|dy|,|dx|)` que `_filter_diagonal_residual_pass2`, reusa la misma banda de settings en vez de introducir una nueva.
+- **Gating:** flag maestro `cv_room_contour_sanitize_enabled` (default `True`) en `settings.py`. Con `False` (o `settings=None`), `_detect_rooms` es idéntico al comportamiento previo (no-op, byte-for-byte).
+- **Log emitido:** `cv_room_contour_sanitized` con `room_contour_edges_sanitized` (vértices removidos, acumulado por corrida) y `rooms_dropped_diagonal_contour` (rooms descartados por contorno no recuperable) en `extra={}`.
+- **Verificado manualmente:** `plan-005-amueblado-limpio` — el vértice espurio `[1234,1559]` del room "Sala" desaparece con el flag ON (11 vértices vs 12 con flag OFF); `plan-002` (6 rooms) y `plan-003` (9 rooms) sin regresión de conteo con el flag ON.
+- **Cuándo usar:** al ajustar la banda diagonal o el umbral de longitud para saneo de polígonos de room; único punto de cambio para este fix.
+- **Anti-pattern:** introducir una banda de ángulo nueva en vez de reusar `cv_wall_diagonal_filter_low_deg/high_deg`; llamar antes de `approxPolyDP`; ignorar el retorno `None` (indica room no recuperable, debe descartarse, no emitirse con arista diagonal).
 
 ### TYPE_CHECKING para imports de tipo-only
 - **Archivo:** `src/vitrina_cv/engines/base.py`, `engines/opencv_classic.py`, `preflight/checks.py`

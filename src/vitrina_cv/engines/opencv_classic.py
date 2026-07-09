@@ -393,10 +393,99 @@ def _detect_walls(wall_mask: NDArray[np.uint8]) -> list[Wall]:
     return walls
 
 
+def _edge_angle_deg(p1: tuple[float, float], p2: tuple[float, float]) -> float:
+    """Angle (degrees, 0-90) of the segment ``p1 -> p2`` from the horizontal axis.
+
+    Uses ``atan2(|dy|, |dx|)`` so the result is orientation-agnostic: 0deg is
+    exactly horizontal, 90deg is exactly vertical, and values in between are
+    diagonal. Mirrors the convention used by ``_filter_diagonal_residual_pass2``
+    for walls so the same angle band applies to room-polygon edges (ADR-001).
+    """
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    return math.degrees(math.atan2(abs(dy), abs(dx)))
+
+
+def _sanitize_room_polygon(
+    polygon: list[tuple[float, float]],
+    low_deg: float,
+    high_deg: float,
+    min_diagonal_len_px: float,
+) -> list[tuple[float, float]] | None:
+    """Remove spurious diagonal vertices from a closed room polygon (ADR-001).
+
+    A vertex is spurious when *both* of its adjacent edges fall inside the
+    diagonal angle band ``[low_deg, high_deg]`` (the same band used by the
+    wall diagonal filter) and at least one of those edges is longer than
+    ``min_diagonal_len_px``. Removing the vertex directly connects its two
+    neighbours, collapsing the diagonal "notch" while leaving legitimate
+    axis-aligned corners (angle 0deg or 90deg, always outside the band)
+    untouched.
+
+    The check runs iteratively because collapsing one vertex can expose a
+    new spurious vertex at the position that used to be its neighbour.
+
+    Args:
+        polygon: Closed polygon vertices in order, no repeated first/last point.
+        low_deg: Lower bound (inclusive) of the diagonal band, in degrees.
+        high_deg: Upper bound (inclusive) of the diagonal band, in degrees.
+        min_diagonal_len_px: Minimum edge length to treat an in-band edge as
+            a spurious diagonal rather than rectangular-corner jitter.
+
+    Returns:
+        The sanitized polygon, or ``None`` if after sanitizing there is still
+        a diagonal edge above the threshold that cannot be resolved by vertex
+        removal (i.e. no ortho-recoverable polygon exists) — the caller must
+        discard the room per AC-2.
+    """
+    points = list(polygon)
+
+    changed = True
+    while changed and len(points) > _MIN_POLYGON_VERTICES:
+        changed = False
+        n = len(points)
+        for i in range(n):
+            prev_pt = points[(i - 1) % n]
+            cur_pt = points[i]
+            next_pt = points[(i + 1) % n]
+
+            angle_prev = _edge_angle_deg(prev_pt, cur_pt)
+            angle_next = _edge_angle_deg(cur_pt, next_pt)
+            len_prev = math.hypot(cur_pt[0] - prev_pt[0], cur_pt[1] - prev_pt[1])
+            len_next = math.hypot(next_pt[0] - cur_pt[0], next_pt[1] - cur_pt[1])
+
+            prev_in_band = low_deg <= angle_prev <= high_deg
+            next_in_band = low_deg <= angle_next <= high_deg
+            long_enough = (
+                len_prev >= min_diagonal_len_px or len_next >= min_diagonal_len_px
+            )
+
+            if prev_in_band and next_in_band and long_enough:
+                points.pop(i)
+                changed = True
+                break
+
+    # Post-check: any remaining edge still inside the band above the
+    # threshold means no ortho-recoverable polygon exists (AC-2).
+    n = len(points)
+    if n < _MIN_POLYGON_VERTICES:
+        return None
+    for i in range(n):
+        cur_pt = points[i]
+        next_pt = points[(i + 1) % n]
+        angle = _edge_angle_deg(cur_pt, next_pt)
+        length = math.hypot(next_pt[0] - cur_pt[0], next_pt[1] - cur_pt[1])
+        if low_deg <= angle <= high_deg and length >= min_diagonal_len_px:
+            return None
+
+    return points
+
+
 def _detect_rooms(
     wall_mask: NDArray[np.uint8],
     img_h: int,
     img_w: int,
+    settings: Settings | None = None,
 ) -> list[Room]:
     """Detect rooms as closed polygons from interior floor regions.
 
@@ -413,11 +502,19 @@ def _detect_rooms(
       5. Per component: find the largest external contour, simplify with
          approxPolyDP (epsilon = 2 % of arc length) to keep axis-aligned
          corners while removing sub-pixel jitter.
+      6. Sanitize the contour (ADR-001, 10-cv-01): ``approxPolyDP`` does not
+         always collapse a spurious diagonal vertex left by a mask artefact.
+         When ``settings.cv_room_contour_sanitize_enabled`` is True (default),
+         ``_sanitize_room_polygon`` removes vertices whose two adjacent edges
+         both fall in the diagonal angle band above a minimum length. If no
+         ortho-recoverable polygon remains, the room is discarded (AC-2).
+         With the flag off (or ``settings=None``), behaviour is unchanged.
 
     Args:
         wall_mask: Binary mask where walls = 255.
         img_h: Image height in pixels.
         img_w: Image width in pixels.
+        settings: Runtime settings. If None, contour sanitizing does not run.
 
     Returns:
         List of Room objects with closed polygons and pixel area.
@@ -439,6 +536,21 @@ def _detect_rooms(
 
     rooms: list[Room] = []
     m = _BORDER_MARGIN_PX
+
+    sanitize_enabled = (
+        settings is not None and settings.cv_room_contour_sanitize_enabled
+    )
+    diag_low_deg = (
+        settings.cv_wall_diagonal_filter_low_deg if settings is not None else 0.0
+    )
+    diag_high_deg = (
+        settings.cv_wall_diagonal_filter_high_deg if settings is not None else 0.0
+    )
+    diag_min_len_px = (
+        float(settings.cv_room_contour_diag_min_len_px) if settings is not None else 0.0
+    )
+    edges_sanitized_count = 0
+    rooms_dropped_count = 0
 
     for label in range(1, num_labels):  # label 0 is the global background
         area = float(stats[label, cv2.CC_STAT_AREA])
@@ -477,7 +589,28 @@ def _detect_rooms(
         polygon: list[tuple[float, float]] = [
             (float(pt[0][0]), float(pt[0][1])) for pt in approx
         ]
+
+        if sanitize_enabled:
+            vertex_count_before = len(polygon)
+            sanitized = _sanitize_room_polygon(
+                polygon, diag_low_deg, diag_high_deg, diag_min_len_px
+            )
+            if sanitized is None:
+                rooms_dropped_count += 1
+                continue
+            edges_sanitized_count += vertex_count_before - len(sanitized)
+            polygon = sanitized
+
         rooms.append(Room(polygon=polygon, area_px=area))
+
+    if sanitize_enabled:
+        _engine_logger.info(
+            "cv_room_contour_sanitized",
+            extra={
+                "room_contour_edges_sanitized": edges_sanitized_count,
+                "rooms_dropped_diagonal_contour": rooms_dropped_count,
+            },
+        )
 
     return rooms
 
@@ -1059,6 +1192,61 @@ def _thickness_from_dt_samples(
     return float(2.0 * np.median(np.array(all_samples, dtype=np.float32)))
 
 
+def _group_indices_by_local_thickness(
+    sorted_values: list[float],
+    segs_by_value: list[tuple[float, float, float, float]],
+    dt: NDArray[np.float32],
+    fallback_tolerance: float,
+) -> tuple[list[tuple[int, int]], int]:
+    """Partition a sorted sequence into clusters using LOCAL wall thickness.
+
+    Unlike ``_group_indices_by_proximity`` (which applies one global tolerance
+    derived from the whole plan), this walks the sorted sequence and, for each
+    candidate merge between consecutive elements, samples the distance
+    transform in the neighbourhood of *both* segments to derive a local
+    thickness estimate. Two consecutive traces merge when their perpendicular
+    separation is <= the local thickness of that zone of the plan — this
+    avoids collapsing distinct thin/thick walls under a single plan-wide value
+    (ADR-003, part A).
+
+    Args:
+        sorted_values: Pre-sorted list of perpendicular-position values (one
+            per segment in *segs_by_value*, same order/index alignment).
+        segs_by_value: Segments aligned 1:1 with *sorted_values*, already
+            sorted by the same key.
+        dt: Float32 distance transform of the (cleaned) wall mask.
+        fallback_tolerance: Tolerance used when local DT sampling yields no
+            usable value (e.g. the segment pair falls outside the mask).
+
+    Returns:
+        Tuple of (list of (start_idx, end_idx_inclusive) cluster pairs,
+        merges_count) where merges_count is the number of consecutive-pair
+        merges applied using the local (not fallback) tolerance — used to
+        populate the ``walls_merged_local_thickness`` counter.
+    """
+    if not sorted_values:
+        return [], 0
+    groups: list[tuple[int, int]] = []
+    merges_count = 0
+    start = 0
+    for i in range(1, len(sorted_values)):
+        local_thickness = _thickness_from_dt_samples(
+            dt, [segs_by_value[i - 1], segs_by_value[i]]
+        )
+        tolerance = (
+            max(local_thickness, _CENTERLINE_MIN_TOL_PX)
+            if local_thickness is not None
+            else fallback_tolerance
+        )
+        if sorted_values[i] - sorted_values[i - 1] > tolerance:
+            groups.append((start, i - 1))
+            start = i
+        elif local_thickness is not None:
+            merges_count += 1
+    groups.append((start, len(sorted_values) - 1))
+    return groups, merges_count
+
+
 # ---------------------------------------------------------------------------
 # F3 — Consolidated walls
 # ---------------------------------------------------------------------------
@@ -1153,8 +1341,21 @@ def _centerline_dt_consolidate(
     h_segs: list[_RawSeg],
     v_segs: list[_RawSeg],
     wall_mask: NDArray[np.uint8],
+    settings: Settings | None = None,
 ) -> list[Wall]:
-    """DT-based centerline consolidation (flag on, 07-cv-03)."""
+    """DT-based centerline consolidation (flag on, 07-cv-03).
+
+    Grouping strategy depends on ``settings.cv_wall_local_thickness_enabled``
+    (10-cv-05, ADR-003 part A):
+
+    - **True (default):** each candidate merge between consecutive parallel
+      traces is evaluated against a LOCAL thickness sampled from the DT in
+      the neighbourhood of that specific pair, instead of one global value
+      for the whole plan. Emits ``walls_merged_local_thickness``.
+    - **False:** legacy behaviour — a single global thickness estimate
+      (``_estimate_global_wall_thickness_px``) is used as the tolerance for
+      every group in the plan.
+    """
     dt: NDArray[np.float32] = cv2.distanceTransform(wall_mask, cv2.DIST_L2, 5)
     wall_thickness_px = _estimate_global_wall_thickness_px(walls, dt)
     _engine_logger.debug(
@@ -1162,12 +1363,24 @@ def _centerline_dt_consolidate(
         extra={"wall_thickness_px": round(wall_thickness_px, 1)},
     )
 
+    local_thickness_enabled: bool = (
+        settings is not None and settings.cv_wall_local_thickness_enabled
+    )
+
     out: list[Wall] = []
+    total_merges = 0
 
     if h_segs:
         h_segs.sort(key=lambda s: (s[1] + s[3]) / 2)
         y_mids = [(s[1] + s[3]) / 2 for s in h_segs]
-        for g_start, g_end in _group_indices_by_proximity(y_mids, wall_thickness_px):
+        if local_thickness_enabled:
+            h_groups, h_merges = _group_indices_by_local_thickness(
+                y_mids, h_segs, dt, wall_thickness_px
+            )
+            total_merges += h_merges
+        else:
+            h_groups = _group_indices_by_proximity(y_mids, wall_thickness_px)
+        for g_start, g_end in h_groups:
             group = h_segs[g_start : g_end + 1]
             y_pos = sum((s[1] + s[3]) / 2 for s in group) / len(group)
             thickness = _thickness_from_dt_samples(dt, group)
@@ -1178,13 +1391,26 @@ def _centerline_dt_consolidate(
     if v_segs:
         v_segs.sort(key=lambda s: (s[0] + s[2]) / 2)
         x_mids = [(s[0] + s[2]) / 2 for s in v_segs]
-        for g_start, g_end in _group_indices_by_proximity(x_mids, wall_thickness_px):
+        if local_thickness_enabled:
+            v_groups, v_merges = _group_indices_by_local_thickness(
+                x_mids, v_segs, dt, wall_thickness_px
+            )
+            total_merges += v_merges
+        else:
+            v_groups = _group_indices_by_proximity(x_mids, wall_thickness_px)
+        for g_start, g_end in v_groups:
             group_v = v_segs[g_start : g_end + 1]
             x_pos = sum((s[0] + s[2]) / 2 for s in group_v) / len(group_v)
             thickness_v = _thickness_from_dt_samples(dt, group_v)
             _merge_segs_into_walls(
                 group_v, x_pos, is_horizontal=False, thickness=thickness_v, out=out
             )
+
+    if local_thickness_enabled:
+        _engine_logger.info(
+            "walls_merged_local_thickness",
+            extra={"count": total_merges},
+        )
 
     return out
 
@@ -1248,7 +1474,13 @@ def _consolidate_walls(
     )
 
     if centerline_enabled:
-        consolidated = _centerline_dt_consolidate(walls, h_segs, v_segs, wall_mask)  # type: ignore[arg-type]
+        consolidated = _centerline_dt_consolidate(
+            walls,
+            h_segs,
+            v_segs,
+            wall_mask,  # type: ignore[arg-type]
+            settings,
+        )
     else:
         consolidated = _legacy_bin_consolidate(h_segs, v_segs)
 
@@ -1387,6 +1619,133 @@ def _snap_walls_orthogonal(walls: list[Wall]) -> list[Wall]:
     return snapped
 
 
+def _extend_wall_endpoint_to_value(
+    coords: list[float],
+    axis: int,
+    target: float,
+    extend_px: int,
+) -> None:
+    """Move the nearer endpoint of a segment (in *axis*) to *target* if eligible.
+
+    Eligibility: the target lies strictly beyond the segment's current extent
+    (i.e. in its prolongation) and the gap is <= *extend_px*.
+
+    Args:
+        coords: Mutable ``[x1, y1, x2, y2]`` list for the wall.
+        axis: 0 for x-axis (horizontal wall), 1 for y-axis (vertical wall).
+        target: Target coordinate value (intersection x or y).
+        extend_px: Maximum gap (px) that triggers extension.
+    """
+    # Index offsets for (start, end) along *axis*: 0/2 for x, 1/3 for y.
+    idx1, idx2 = axis, axis + 2
+    v1, v2 = coords[idx1], coords[idx2]
+    lo, hi = (v1, v2) if v1 <= v2 else (v2, v1)
+    lo_idx, hi_idx = (idx1, idx2) if v1 <= v2 else (idx2, idx1)
+
+    # Extend the high (rightmost/bottommost) endpoint rightward/downward.
+    if target > hi and target - hi <= extend_px:
+        coords[hi_idx] = target
+
+    # Extend the low (leftmost/topmost) endpoint leftward/upward.
+    if target < lo and lo - target <= extend_px:
+        coords[lo_idx] = target
+
+
+def _extend_to_intersection(walls: list[Wall], extend_px: int) -> list[Wall]:
+    """Extend H/V wall endpoints to their geometric intersection to close gaps.
+
+    Operates between ``_snap_walls_orthogonal`` (walls are already exact H/V)
+    and ``_fuse_junctions`` (which collapses coincident endpoints into junctions).
+    After snapping, the gap at a corner is a pure geometry problem: the endpoint
+    of a horizontal wall and the endpoint of the vertical wall that should meet
+    it are both <= *extend_px* from the intersection, but neither has been
+    extended to reach it.  This phase moves those endpoints to the intersection
+    so that ``_fuse_junctions`` finds distance ~0 and produces a real junction.
+
+    Invariants:
+    - Only **orthogonal pairs** are considered (one H wall x one V wall).
+      Parallel pairs (H-H, V-V) are ignored: they have no finite corner
+      intersection relevant to a junction.
+    - An endpoint is moved to the intersection **only if**:
+      (a) its distance to the intersection is ``<= extend_px``, AND
+      (b) the intersection lies in the **prolongation** of the segment
+          (strictly beyond the segment's current extent in the relevant axis),
+          never in its interior.
+    - Pure function: same cardinality in and out, no side effects.
+    - Idempotent: if all gaps are already ~0 (e.g. plan-004), every endpoint
+      either lies exactly at the intersection (condition b fails — already at
+      the boundary) or is farther than *extend_px*, so the output is unchanged.
+    - ``wall.thickness`` is preserved unchanged on every reconstructed Wall.
+
+    Coordinate system: image convention (x grows right, y grows down).
+
+    Args:
+        walls: Wall segments after ``_snap_walls_orthogonal`` — each wall is
+            either exactly horizontal (``start.y == end.y``) or exactly vertical
+            (``start.x == end.x``).  Diagonal walls are left untouched.
+        extend_px: Maximum gap in pixels that triggers extension.  Must be > 0.
+            Comes from ``settings.cv_junction_extend_px`` (default 40, calibrated
+            for ~2000 px normalised images).
+
+    Returns:
+        New list of Wall objects with the same length as *walls*.
+    """
+    # Work on mutable coordinate lists so we can update endpoints across
+    # multiple pairs before reconstructing Wall objects at the end.
+    # Each entry: [x1, y1, x2, y2]
+    coords: list[list[float]] = [
+        [w.start[0], w.start[1], w.end[0], w.end[1]] for w in walls
+    ]
+
+    n = len(walls)
+    for i in range(n):
+        xi1, yi1, xi2, yi2 = coords[i]
+        is_h_i = yi1 == yi2  # horizontal: same y
+        is_v_i = xi1 == xi2  # vertical:   same x
+        if not (is_h_i or is_v_i):
+            continue  # diagonal — skip
+
+        for j in range(i + 1, n):
+            xj1, yj1, xj2, yj2 = coords[j]
+            is_h_j = yj1 == yj2
+            is_v_j = xj1 == xj2
+            if not (is_h_j or is_v_j):
+                continue  # diagonal — skip
+
+            # Accept only strictly orthogonal pairs (one H, one V).
+            if is_h_i and is_v_j:
+                h_idx, v_idx = i, j
+            elif is_v_i and is_h_j:
+                h_idx, v_idx = j, i
+            else:
+                continue  # parallel pair (H-H or V-V)
+
+            # Geometric intersection: x of vertical wall, y of horizontal wall.
+            ix = coords[v_idx][0]  # wall_v.start.x == wall_v.end.x
+            iy = coords[h_idx][1]  # wall_h.start.y == wall_h.end.y
+
+            # Extend H wall endpoints along x toward ix (axis=0).
+            _extend_wall_endpoint_to_value(coords[h_idx], 0, ix, extend_px)
+            # Extend V wall endpoints along y toward iy (axis=1).
+            _extend_wall_endpoint_to_value(coords[v_idx], 1, iy, extend_px)
+
+    extended: list[Wall] = [
+        Wall(
+            start=(coords[k][0], coords[k][1]),
+            end=(coords[k][2], coords[k][3]),
+            thickness=walls[k].thickness,
+        )
+        for k in range(n)
+    ]
+
+    _engine_logger.debug(
+        "cv_junction_extend_to_intersection",
+        extra={"walls_count": n, "extend_px": extend_px},
+    )
+
+    return extended
+
+
 def _fuse_junctions(
     walls: list[Wall],
 ) -> tuple[list[Wall], list[Point]]:
@@ -1493,6 +1852,77 @@ def _fuse_junctions(
     )
 
     return updated, junctions
+
+
+def _filter_diagonal_residual_pass2(
+    walls: list[Wall],
+    settings: Settings | None,
+) -> list[Wall]:
+    """Second diagonal-residual filter pass, run after ``_fuse_junctions`` (ADR-017).
+
+    Complements the pass-1 band filter in ``_consolidate_walls`` with two
+    mechanisms that address a diagonal stub (stair/sectional-door remnant)
+    surviving snap/extend/fuse:
+
+    - **Mec.1 (angle re-filter):** re-evaluates each wall's angle and discards
+      walls whose angle falls in the *same* ``[low_deg, high_deg]`` band used
+      by pass 1. Idempotent on already-snapped H/V-exact walls: their angle is
+      exactly 0deg or 90deg, which never falls inside the band.
+    - **Mec.2 (minimum length):** discards any wall that is *not* H/V-exact
+      (``start.x != end.x`` and ``start.y != end.y``) **and** whose Euclidean
+      length is below ``settings.cv_wall_min_diagonal_len_px``. Never applies
+      to an exact H/V wall regardless of its length.
+
+    Both mechanisms are gated by the same master switch
+    ``settings.cv_wall_diagonal_filter_enabled`` used by pass 1. When the flag
+    is False (or settings is None), this function is a no-op and returns
+    ``walls`` unchanged — preserving pre-run-08 output byte-for-byte (AC-11).
+
+    Args:
+        walls: Wall segments after ``_fuse_junctions``.
+        settings: Runtime settings. If None, the filter does not run.
+
+    Returns:
+        Filtered list of Wall objects (same objects, no reconstruction of
+        surviving walls).
+    """
+    if settings is None or not settings.cv_wall_diagonal_filter_enabled:
+        return walls
+
+    low_deg = settings.cv_wall_diagonal_filter_low_deg
+    high_deg = settings.cv_wall_diagonal_filter_high_deg
+    min_diagonal_len_px = settings.cv_wall_min_diagonal_len_px
+
+    kept: list[Wall] = []
+    discarded_by_angle = 0
+    discarded_by_length = 0
+    for wall in walls:
+        x1, y1 = wall.start
+        x2, y2 = wall.end
+        is_exact_hv = x1 == x2 or y1 == y2
+
+        angle_deg = math.degrees(math.atan2(abs(y2 - y1), abs(x2 - x1)))
+        if low_deg <= angle_deg <= high_deg:
+            discarded_by_angle += 1
+            continue
+
+        if not is_exact_hv:
+            length_px = math.hypot(x2 - x1, y2 - y1)
+            if length_px < min_diagonal_len_px:
+                discarded_by_length += 1
+                continue
+
+        kept.append(wall)
+
+    _engine_logger.info(
+        "cv_wall_diagonal_pass2_filtered",
+        extra={
+            "count_by_angle": discarded_by_angle,
+            "count_by_length": discarded_by_length,
+        },
+    )
+
+    return kept
 
 
 # ---------------------------------------------------------------------------
@@ -2180,8 +2610,16 @@ class OpenCVClassicEngine(GeometryEngine):
         # ---- 6b. Snap near-orthogonal walls and fuse junctions (07-cv-04) --
         # Snapping first so that endpoints corrected to exact H/V are already
         # axis-aligned when the junction fusion distance check runs.
+        # _extend_to_intersection (08-cv-xx) runs after snapping so walls are
+        # exact H/V, and before fusion so coincident endpoints produce junctions.
         walls = _snap_walls_orthogonal(walls)
+        walls = _extend_to_intersection(walls, self._settings.cv_junction_extend_px)
         walls, self._junctions = _fuse_junctions(walls)
+        # ---- 6c. Diagonal residual filter, pass 2 (ADR-017) ------------
+        # Re-filters by angle (Mec.1) and by minimum length for surviving
+        # oblique walls (Mec.2). Gated by the same master switch as pass 1
+        # in _consolidate_walls; no-op with the flag disabled (AC-11).
+        walls = _filter_diagonal_residual_pass2(walls, self._settings)
 
         # ---- 7. Detect rooms with gap-closed mask (F1) -----------------
         # A separate closed mask bridges architectural openings so that CCA
@@ -2214,7 +2652,7 @@ class OpenCVClassicEngine(GeometryEngine):
             close_h_gap_px=_h_gap,
             close_v_gap_px=_v_gap,
         )
-        rooms = _detect_rooms(closed_wall_mask, img_h, img_w)
+        rooms = _detect_rooms(closed_wall_mask, img_h, img_w, self._settings)
         t_rooms = time.monotonic()
 
         # ---- 7b. Filter interior components (furniture / fixtures) ------

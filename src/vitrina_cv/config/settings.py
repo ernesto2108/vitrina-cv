@@ -84,6 +84,11 @@ Defaults:
                                                   Example: "/opt/homebrew/bin/tesseract".
                                                   Default: "" (auto).)
 
+  Junction extend-to-intersection (08-cv-xx — F4 phase between snap and fuse):
+  CV_JUNCTION_EXTEND_PX           = 40           (max gap (px) to extend H/V wall endpoints to
+                                                  their orthogonal intersection. Calibrated for
+                                                  ~2000 px normalised images. gt=0.)
+
   Staircase detection (07-cv-10 — uses pre-filter mask before filter_thin_strokes):
   CV_STAIRS_DETECTION_ENABLED     = true         (master switch. When false,
                                                   stairs_candidates=[] and the pipeline
@@ -244,6 +249,19 @@ class Settings(BaseSettings):
             "or nearly touch the bbox edge. Default: 20."
         ),
     )
+    cv_cleanup_crop_min_area_ratio: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Step 3 (ADR-015) — minimum area ratio (relative to the largest "
+            "connected component) for a secondary component to be treated as "
+            "'significant' during the multi-component crop and included in the "
+            "combined bounding box, instead of being discarded as noise. "
+            "0.05 = a component must have at least 5% of the largest "
+            "component's area to count. Default: 0.05."
+        ),
+    )
     cv_cleanup_thickness_filter_enabled: bool = Field(
         default=True,
         description=(
@@ -386,6 +404,19 @@ class Settings(BaseSettings):
             "Default: True."
         ),
     )
+    cv_wall_min_diagonal_len_px: int = Field(
+        default=40,
+        gt=0,
+        description=(
+            "Minimum Euclidean length (px) for a surviving oblique (diagonal) "
+            "Wall segment to be kept after diagonal classification (ADR-017, "
+            "Mec.2). Diagonal walls shorter than this value are discarded as "
+            "residual noise (e.g. spurious Hough fragments) rather than "
+            "legitimate diagonal walls. Default value to be calibrated later "
+            "against real fixtures — for now the example value is used. "
+            "Default: 40."
+        ),
+    )
     cv_wall_diagonal_filter_low_deg: float = Field(
         default=20.0,
         ge=0.0,
@@ -408,6 +439,35 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Room contour sanitize (10-cv-01, ADR-001) ---
+    cv_room_contour_sanitize_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True, _detect_rooms sanitizes each room polygon after "
+            "approxPolyDP: any vertex whose two adjacent edges both fall in the "
+            "diagonal band [CV_WALL_DIAGONAL_FILTER_LOW_DEG, "
+            "CV_WALL_DIAGONAL_FILTER_HIGH_DEG] (reusing the same band as the wall "
+            "diagonal filter) and whose edge length exceeds "
+            "CV_ROOM_CONTOUR_DIAG_MIN_LEN_PX is dropped and the contour "
+            "re-simplified. Rooms whose sanitized contour still has a diagonal "
+            "edge above the threshold are discarded entirely (ADR-001 AC-2). "
+            "When False, _detect_rooms behaves exactly as before (no-op). "
+            "Default: True."
+        ),
+    )
+    cv_room_contour_diag_min_len_px: int = Field(
+        default=40,
+        gt=0,
+        description=(
+            "Minimum Euclidean length (px) for a room-polygon edge to be "
+            "considered a spurious diagonal candidate for removal (ADR-001). "
+            "Edges shorter than this value are assumed to be legitimate corner "
+            "jitter within a rectilinear room and are left untouched. Same "
+            "default as CV_WALL_MIN_DIAGONAL_LEN_PX (40) pending calibration "
+            "against real fixtures."
+        ),
+    )
+
     # --- Rectilinear adaptive filter for high-res images (08-cv-03) ---
     cv_cleanup_rectilinear_adaptive_enabled: bool = Field(
         default=True,
@@ -420,6 +480,19 @@ class Settings(BaseSettings):
             "preserving long perimeter walls. "
             "When False, the previous skip behaviour is preserved for high-res "
             "images. Default: True."
+        ),
+    )
+    cv_cleanup_rectilinear_min_len_px: int = Field(
+        default=50,
+        gt=0,
+        description=(
+            "Step 2 (ADR-014) — floor of the adaptive kernel length used by "
+            "the directional open kernel (retain_rectilinear) on native "
+            "high-resolution images: len_px = max(CV_CLEANUP_RECTILINEAR_MIN_LEN_PX, "
+            "round(CV_CLEANUP_RECTILINEAR_LEN_PX * min(h,w) / CV_UPSCALE_TARGET_PX)). "
+            "Replaces the previously hardcoded literal 50 shared by both the "
+            "fixed and adaptive branches, so the floor can be tuned per "
+            "deployment. Default: 50."
         ),
     )
 
@@ -435,6 +508,23 @@ class Settings(BaseSettings):
             "The output Wall.thickness is 2 x median(DT samples along the segment), "
             "in pixels — the consumer multiplies by metersPerPx to get metres. "
             "Set to False to restore the legacy fixed-bin behaviour exactly. "
+            "Default: True."
+        ),
+    )
+
+    # --- Wall local thickness grouping (10-cv-05, ADR-003 part A) ---
+    cv_wall_local_thickness_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True, _consolidate_walls groups parallel HoughLinesP traces "
+            "using a per-group tolerance derived from the LOCAL wall thickness "
+            "(sampled from the distanceTransform in the neighbourhood of each "
+            "candidate group), instead of a single global thickness estimate "
+            "for the whole plan. Fixes fragmentation in dense plans with "
+            "heterogeneous wall thickness (ADR-003, part A). "
+            "When False, falls back to _estimate_global_wall_thickness_px "
+            "(pre-10-cv-05 behaviour, identical byte-for-byte). "
+            "Only takes effect when cv_wall_centerline_enabled is also True. "
             "Default: True."
         ),
     )
@@ -467,6 +557,21 @@ class Settings(BaseSettings):
             "Optional override for the path to the tesseract binary. "
             "Empty string = auto-detect via PATH. "
             "Example: '/opt/homebrew/bin/tesseract'. Default: '' (auto)."
+        ),
+    )
+
+    # --- Junction extend-to-intersection (08-cv-xx / F4) ---
+    cv_junction_extend_px: int = Field(
+        default=40,
+        gt=0,
+        description=(
+            "Max gap (px) for extending H/V wall endpoints to their orthogonal "
+            "intersection in F4 (_extend_to_intersection). A wall endpoint is "
+            "moved to the intersection only when its distance to the intersection "
+            "is <= this value AND the intersection falls in the prolongation of "
+            "the segment (outside its current extent), never in its interior. "
+            "Calibrated for ~2000 px normalised images; scale proportionally for "
+            "native high-resolution plans. Default: 40."
         ),
     )
 

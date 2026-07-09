@@ -1,7 +1,7 @@
 # Context Navigator — vitrina-cv
 
 last_full_scan: 2026-07-02
-last_updated: 2026-07-06T05:00:00  # reporter delta: 07-cv-10 _detect_stairs_candidates + CV_STAIRS_DETECTION_ENABLED
+last_updated: 2026-07-08T01:00:00  # reporter delta: 10-cv-01 saneo de contorno de room (ADR-001), flag CV_ROOM_CONTOUR_SANITIZE_ENABLED
 coverage: bootstrap
 
 ## Índice
