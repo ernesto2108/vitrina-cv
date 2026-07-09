@@ -406,21 +406,55 @@ def _edge_angle_deg(p1: tuple[float, float], p2: tuple[float, float]) -> float:
     return math.degrees(math.atan2(abs(dy), abs(dx)))
 
 
+def _perpendicular_deviation_px(
+    p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]
+) -> float:
+    """Perpendicular distance from point ``p`` to the line through ``a`` and ``b``.
+
+    Falls back to the Euclidean distance to ``a`` when ``a == b`` (degenerate
+    line), which should not happen for a valid polygon but keeps the function
+    total.
+    """
+    ax, ay = a
+    bx, by = b
+    px, py = p
+    dx, dy = bx - ax, by - ay
+    length = math.hypot(dx, dy)
+    if length == 0:
+        return math.hypot(px - ax, py - ay)
+    return abs(dx * (py - ay) - dy * (px - ax)) / length
+
+
 def _sanitize_room_polygon(
     polygon: list[tuple[float, float]],
     low_deg: float,
     high_deg: float,
     min_diagonal_len_px: float,
+    min_deviation_px: float,
 ) -> list[tuple[float, float]] | None:
     """Remove spurious diagonal vertices from a closed room polygon (ADR-001).
 
-    A vertex is spurious when *both* of its adjacent edges fall inside the
-    diagonal angle band ``[low_deg, high_deg]`` (the same band used by the
-    wall diagonal filter) and at least one of those edges is longer than
-    ``min_diagonal_len_px``. Removing the vertex directly connects its two
-    neighbours, collapsing the diagonal "notch" while leaving legitimate
-    axis-aligned corners (angle 0deg or 90deg, always outside the band)
-    untouched.
+    A vertex is a *spurious* mask artefact — as opposed to a short, legitimate
+    jog/step in a dense floor plan — only when **all** of the following hold:
+
+    1. Both adjacent edges fall inside the diagonal angle band
+       ``[low_deg, high_deg]`` (the same band used by the wall diagonal
+       filter).
+    2. At least one of those edges is longer than ``min_diagonal_len_px``.
+    3. The vertex's perpendicular distance to the straight line joining its
+       two *non-adjacent* neighbours (i.e. the edge that would exist if the
+       vertex were removed) exceeds ``min_deviation_px``.
+
+    Condition 3 is the key discriminator (10-cv-02 fix to ADR-001): reusing
+    only the wall angle band + a short length threshold is too aggressive for
+    room contours — legitimate short jogs in dense, stepped partitions can
+    have an in-band angle and cross the length threshold while staying close
+    to the contour's expected path. A genuine spurious vertex (mask artefact)
+    is a pronounced spike that deviates far from that expected path. Removing
+    a qualifying vertex directly connects its two neighbours, collapsing the
+    diagonal "notch" while leaving legitimate axis-aligned corners (angle
+    0deg or 90deg, always outside the band) and legitimate short jogs
+    (in-band angle but low deviation) untouched.
 
     The check runs iteratively because collapsing one vertex can expose a
     new spurious vertex at the position that used to be its neighbour.
@@ -430,7 +464,10 @@ def _sanitize_room_polygon(
         low_deg: Lower bound (inclusive) of the diagonal band, in degrees.
         high_deg: Upper bound (inclusive) of the diagonal band, in degrees.
         min_diagonal_len_px: Minimum edge length to treat an in-band edge as
-            a spurious diagonal rather than rectangular-corner jitter.
+            a spurious diagonal candidate rather than rectangular-corner jitter.
+        min_deviation_px: Minimum perpendicular deviation from the expected
+            (post-removal) contour line for a candidate vertex to be
+            confirmed as spurious rather than a legitimate short jog.
 
     Returns:
         The sanitized polygon, or ``None`` if after sanitizing there is still
@@ -459,23 +496,43 @@ def _sanitize_room_polygon(
             long_enough = (
                 len_prev >= min_diagonal_len_px or len_next >= min_diagonal_len_px
             )
+            deviation = _perpendicular_deviation_px(cur_pt, prev_pt, next_pt)
+            deviates_enough = deviation >= min_deviation_px
 
-            if prev_in_band and next_in_band and long_enough:
+            if prev_in_band and next_in_band and long_enough and deviates_enough:
                 points.pop(i)
                 changed = True
                 break
 
-    # Post-check: any remaining edge still inside the band above the
-    # threshold means no ortho-recoverable polygon exists (AC-2).
+    # Post-check: any remaining vertex that still satisfies the full spurious
+    # test (both adjacent edges in-band, long enough, AND deviates enough
+    # from the expected contour) means no ortho-recoverable polygon exists
+    # (AC-2) — the removal loop above should have collapsed it already, so
+    # reaching this state indicates a structural case the loop cannot
+    # resolve (e.g. adjacent spurious vertices forming a cycle). A surviving
+    # in-band edge that belongs to a legitimate short jog (low deviation) is
+    # NOT grounds for dropping the room — it was never spurious to begin
+    # with, per the same 3-condition test used during removal.
     n = len(points)
     if n < _MIN_POLYGON_VERTICES:
         return None
     for i in range(n):
+        prev_pt = points[(i - 1) % n]
         cur_pt = points[i]
         next_pt = points[(i + 1) % n]
-        angle = _edge_angle_deg(cur_pt, next_pt)
-        length = math.hypot(next_pt[0] - cur_pt[0], next_pt[1] - cur_pt[1])
-        if low_deg <= angle <= high_deg and length >= min_diagonal_len_px:
+
+        angle_prev = _edge_angle_deg(prev_pt, cur_pt)
+        angle_next = _edge_angle_deg(cur_pt, next_pt)
+        len_prev = math.hypot(cur_pt[0] - prev_pt[0], cur_pt[1] - prev_pt[1])
+        len_next = math.hypot(next_pt[0] - cur_pt[0], next_pt[1] - cur_pt[1])
+
+        prev_in_band = low_deg <= angle_prev <= high_deg
+        next_in_band = low_deg <= angle_next <= high_deg
+        long_enough = len_prev >= min_diagonal_len_px or len_next >= min_diagonal_len_px
+        deviation = _perpendicular_deviation_px(cur_pt, prev_pt, next_pt)
+        deviates_enough = deviation >= min_deviation_px
+
+        if prev_in_band and next_in_band and long_enough and deviates_enough:
             return None
 
     return points
@@ -506,9 +563,13 @@ def _detect_rooms(
          always collapse a spurious diagonal vertex left by a mask artefact.
          When ``settings.cv_room_contour_sanitize_enabled`` is True (default),
          ``_sanitize_room_polygon`` removes vertices whose two adjacent edges
-         both fall in the diagonal angle band above a minimum length. If no
-         ortho-recoverable polygon remains, the room is discarded (AC-2).
-         With the flag off (or ``settings=None``), behaviour is unchanged.
+         both fall in the diagonal angle band above a minimum length AND
+         whose perpendicular deviation from the expected (post-removal)
+         contour line exceeds a minimum threshold (10-cv-02 — distinguishes a
+         genuine mask-artefact spike from a short, legitimate jog in dense
+         floor plans). If no ortho-recoverable polygon remains, the room is
+         discarded (AC-2). With the flag off (or ``settings=None``),
+         behaviour is unchanged.
 
     Args:
         wall_mask: Binary mask where walls = 255.
@@ -548,6 +609,11 @@ def _detect_rooms(
     )
     diag_min_len_px = (
         float(settings.cv_room_contour_diag_min_len_px) if settings is not None else 0.0
+    )
+    diag_min_deviation_px = (
+        float(settings.cv_room_contour_deviation_min_px)
+        if settings is not None
+        else 0.0
     )
     edges_sanitized_count = 0
     rooms_dropped_count = 0
@@ -593,7 +659,11 @@ def _detect_rooms(
         if sanitize_enabled:
             vertex_count_before = len(polygon)
             sanitized = _sanitize_room_polygon(
-                polygon, diag_low_deg, diag_high_deg, diag_min_len_px
+                polygon,
+                diag_low_deg,
+                diag_high_deg,
+                diag_min_len_px,
+                diag_min_deviation_px,
             )
             if sanitized is None:
                 rooms_dropped_count += 1

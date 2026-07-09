@@ -3,7 +3,7 @@
 <!-- Naming, estructura de carpetas, idioma del código, reglas de linting y patrones prohibidos.
      Complementado con patrones de diseño detectados automáticamente en el código. -->
 
-last_updated: 2026-07-08
+last_updated: 2026-07-08T02:00:00
 
 ## Idioma del código
 
@@ -284,16 +284,18 @@ Comandos:
 - **Cuándo usar:** al ajustar la banda o el umbral de longitud del filtro diagonal; es el único punto de cambio para el pase 2. No confundir con el filtro de pase 1 dentro de `_consolidate_walls` (banda pre-snap).
 - **Anti-pattern:** llamar antes de `_fuse_junctions`; introducir una banda o flag nuevos en vez de reusar `cv_wall_diagonal_filter_low_deg/high_deg` y `cv_wall_diagonal_filter_enabled`; aplicar Mec.2 a un muro H/V exacto.
 
-### _sanitize_room_polygon — saneo de contorno de room (10-cv-01, ADR-001) — engines/opencv_classic.py
+### _sanitize_room_polygon — saneo de contorno de room (10-cv-01/02, ADR-001) — engines/opencv_classic.py
 - **Archivo:** `src/vitrina_cv/engines/opencv_classic.py`
 - **Cuándo en el pipeline:** dentro de `_detect_rooms`, inmediatamente después de `approxPolyDP` (paso 5), antes de emitir el `Room`.
-- **Qué hace:** elimina vértices espurios de un polígono de room cerrado cuando **ambas** aristas adyacentes caen en la misma banda diagonal `[cv_wall_diagonal_filter_low_deg, cv_wall_diagonal_filter_high_deg]` que usa el filtro de muros, y al menos una de las dos supera `cv_room_contour_diag_min_len_px`. Corre iterativamente (colapsar un vértice puede exponer otro espurio). Si tras el saneo queda una arista en banda por encima del umbral (no hay polígono ortogonal recuperable), la función retorna `None` y el room se descarta (AC-2).
+- **Qué hace:** elimina vértices espurios de un polígono de room cerrado cuando se cumplen **3 condiciones**: (1) ambas aristas adyacentes caen en la misma banda diagonal `[cv_wall_diagonal_filter_low_deg, cv_wall_diagonal_filter_high_deg]` que usa el filtro de muros; (2) al menos una de las dos supera `cv_room_contour_diag_min_len_px`; (3) la desviación perpendicular del vértice respecto a la línea recta que conectaría a sus vecinos no-adyacentes (el contorno "esperado" tras remover el vértice) supera `cv_room_contour_deviation_min_px` (default 100px). La condición 3 (10-cv-02, corrección post-QA) distingue un vértice espurio real (pico pronunciado, ej. plan-005 con desviación ~215px) de un jog corto legítimo en plantas densas con particiones escalonadas (ej. plan-001 con arista ~53px y desviación ~46px, que antes se descartaba erróneamente por reusar solo ángulo+longitud). Corre iterativamente (colapsar un vértice puede exponer otro espurio). El post-check de AC-2 (¿queda polígono ortogonal recuperable?) usa las mismas 3 condiciones a nivel de vértice, no solo ángulo+longitud de arista — de lo contrario un jog legítimo superviviente causaría el descarte incorrecto de todo el room.
 - **Helper de ángulo:** `_edge_angle_deg(p1, p2)` — misma convención `atan2(|dy|,|dx|)` que `_filter_diagonal_residual_pass2`, reusa la misma banda de settings en vez de introducir una nueva.
+- **Helper de desviación:** `_perpendicular_deviation_px(p, a, b)` — distancia perpendicular de `p` a la recta `a-b`; nuevo en 10-cv-02.
 - **Gating:** flag maestro `cv_room_contour_sanitize_enabled` (default `True`) en `settings.py`. Con `False` (o `settings=None`), `_detect_rooms` es idéntico al comportamiento previo (no-op, byte-for-byte).
 - **Log emitido:** `cv_room_contour_sanitized` con `room_contour_edges_sanitized` (vértices removidos, acumulado por corrida) y `rooms_dropped_diagonal_contour` (rooms descartados por contorno no recuperable) en `extra={}`.
-- **Verificado manualmente:** `plan-005-amueblado-limpio` — el vértice espurio `[1234,1559]` del room "Sala" desaparece con el flag ON (11 vértices vs 12 con flag OFF); `plan-002` (6 rooms) y `plan-003` (9 rooms) sin regresión de conteo con el flag ON.
-- **Cuándo usar:** al ajustar la banda diagonal o el umbral de longitud para saneo de polígonos de room; único punto de cambio para este fix.
-- **Anti-pattern:** introducir una banda de ángulo nueva en vez de reusar `cv_wall_diagonal_filter_low_deg/high_deg`; llamar antes de `approxPolyDP`; ignorar el retorno `None` (indica room no recuperable, debe descartarse, no emitirse con arista diagonal).
+- **Verificado manualmente (10-cv-02, overrides reales de `docker-compose-local.yml`):** `plan-005-amueblado-limpio` — vértice espurio `[1234,1559]` sigue eliminándose (sin regresión); `plan-002-simple-limpio` (6 rooms) y `plan-003-reticula-cotas` (9 rooms) sin cambio; `plan-001-denso-achurado` — el room `area_px≈51971` (antes descartado como falso positivo) ahora sobrevive — 9 rooms totales, no 8.
+- **Setting nuevo:** `cv_room_contour_deviation_min_px` (int, `gt=0`, default 100) en `settings.py` — calibrado entre el caso legítimo (~46px) y el espurio confirmado (~215px).
+- **Cuándo usar:** al ajustar la banda diagonal, el umbral de longitud o el umbral de deviación para saneo de polígonos de room; único punto de cambio para este fix.
+- **Anti-pattern:** introducir una banda de ángulo nueva en vez de reusar `cv_wall_diagonal_filter_low_deg/high_deg`; llamar antes de `approxPolyDP`; ignorar el retorno `None` (indica room no recuperable, debe descartarse, no emitirse con arista diagonal); aplicar el criterio de ángulo+longitud sin la condición de deviación (reintroduce el falso positivo de 10-cv-02).
 
 ### TYPE_CHECKING para imports de tipo-only
 - **Archivo:** `src/vitrina_cv/engines/base.py`, `engines/opencv_classic.py`, `preflight/checks.py`

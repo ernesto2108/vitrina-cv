@@ -467,6 +467,25 @@ class Settings(BaseSettings):
             "against real fixtures."
         ),
     )
+    cv_room_contour_deviation_min_px: int = Field(
+        default=100,
+        gt=0,
+        description=(
+            "Minimum perpendicular deviation (px) of a candidate spurious "
+            "vertex from the straight line joining its two non-adjacent "
+            "neighbours (the 'expected' rectilinear edge), required for the "
+            "vertex to be treated as a true mask artefact and removed "
+            "(10-cv-02 fix to ADR-001). Reusing only the diagonal angle band "
+            "+ min length was too aggressive: it also discarded short, "
+            "legitimate jogs/steps in dense floor plans (e.g. a ~53px "
+            "diagonal edge with ~46px perpendicular deviation, plan-001-denso-"
+            "achurado) whose deviation from the expected contour is small. A "
+            "genuine spurious peak (e.g. plan-005-amueblado-limpio, vertex "
+            "[1234,1559], ~215px deviation) is a pronounced spike, not a "
+            "short step. Default: 100 (roughly between the two observed "
+            "cases: 46px legitimate jog, 215px spurious peak)."
+        ),
+    )
 
     # --- Rectilinear adaptive filter for high-res images (08-cv-03) ---
     cv_cleanup_rectilinear_adaptive_enabled: bool = Field(
