@@ -64,6 +64,32 @@ class ErrorCode(StrEnum):
     model_not_loaded = "model_not_loaded"
 
 
+class SemanticLabel(StrEnum):
+    """Closed enum of semantic furniture/element classes (ADR-004, run 11).
+
+    Extending this enum requires a new contract version — coordinate with
+    vitrina-web before adding values (cv-service.openapi.yaml SemanticLabel).
+    """
+
+    bed = "bed"
+    window = "window"
+    sofa = "sofa"
+    table = "table"
+    chair = "chair"
+    door = "door"
+
+
+class SemanticSource(StrEnum):
+    """Engine that produced a semantic detection (ADR-002/ADR-004, run 11).
+
+    "zeroshot" = Phase A (OWL-ViT / Grounding DINO, no fine-tuning).
+    "finetuned" = Phase B (YOLO-World, deferred — not implemented in v0.3.0).
+    """
+
+    zeroshot = "zeroshot"
+    finetuned = "finetuned"
+
+
 # ---------------------------------------------------------------------------
 # Component schemas — match OpenAPI names and required/optional exactly
 # ---------------------------------------------------------------------------
@@ -125,6 +151,29 @@ class StairsCandidate(BaseModel):
     confidence: Annotated[float, Field(ge=0.0, le=1.0)]
 
 
+class SemanticObject(BaseModel):
+    """A semantic detection (furniture/element) from the semantic engine (ADR-004, run 11).
+
+    Emitted by any SemanticEngine implementation (vitrina_cv.engines.semantic) and
+    merged into Geometry.objects.  The engine never decides room membership — room_id
+    is resolved by merge_semantic from the geometric context passed to detect().
+
+    OpenAPI required: [label, bbox, confidence, needs_review, source].
+    bbox: [x, y, w, h] in pixels, same coordinate space as walls/rooms/openings.
+    confidence: [0, 1].
+    needs_review: true when confidence < CV_SEM_CONFIDENCE_MIN.
+    room_id: optional reference to the containing Room; null until resolved.
+    """
+
+    label: SemanticLabel
+    # [x, y, w, h] in pixels.  OpenAPI: array[number], minItems=4, maxItems=4.
+    bbox: tuple[float, float, float, float]
+    confidence: Annotated[float, Field(ge=0.0, le=1.0)]
+    needs_review: bool
+    room_id: str | None = None
+    source: SemanticSource
+
+
 class Scale(BaseModel):
     """Scale derived from dimension annotations in the floor plan.
 
@@ -160,6 +209,7 @@ class Geometry(BaseModel):
     rooms: list[Room]
     openings: list[Opening]
     stairs_candidates: list[StairsCandidate] = []
+    objects: list[SemanticObject] = []
     scale: Scale
     image_size: ImageSize
 

@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from vitrina_cv.api.routers import extract_geometry, health, preflight
 from vitrina_cv.config.settings import get_settings
 from vitrina_cv.engines import get_engine
+from vitrina_cv.engines.semantic.base import get_semantic_engine
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     The engine is stored in app.state so routers can retrieve it without
     reinstantiating it per-request (Strategy pattern, ADR-008).
+
+    The semantic engine (run 11, ADR-004) is optional: CV_SEM_ENGINE empty/off
+    keeps app.state.semantic_engine as None and the semantic track disabled
+    end-to-end (AC-2 spec-cv-service — objects: [] always in that case).
     """
     settings = get_settings()
     logger.info("Initialising CV engine", extra={"cv_engine": settings.cv_engine})
@@ -38,6 +43,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         "CV engine ready",
         extra={"cv_engine": settings.cv_engine, "is_ready": engine.is_ready},
     )
+
+    logger.info(
+        "Initialising semantic engine", extra={"cv_sem_engine": settings.cv_sem_engine}
+    )
+    semantic_engine = get_semantic_engine(settings.cv_sem_engine, settings=settings)
+    app.state.semantic_engine = semantic_engine
+    logger.info(
+        "Semantic engine ready",
+        extra={
+            "cv_sem_engine": settings.cv_sem_engine,
+            "is_ready": semantic_engine.is_ready if semantic_engine else None,
+        },
+    )
+
     yield
     # Classical OpenCV engine holds no resources; nothing to release.
     logger.info("Shutting down vitrina-cv")

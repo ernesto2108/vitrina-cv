@@ -49,6 +49,23 @@ POST /preflight (PNG bytes) → run_preflight(image_bytes, settings) → Preflig
 - `orientation`: bucket HoughLinesP ("horizontal"/"vertical"/"diagonal (N°)") o `None`
 - `suggestions[]`: una frase accionable en español por check fallido, sin duplicados
 
+### semantic (run 11, ADR-002/ADR-004)
+Detección de mobiliario/elementos sobre el plano (`SemanticObject`), track independiente de la geometría.
+
+```
+engines/semantic/
+├── base.py       — interfaz SemanticEngine + factory get_semantic_engine() (11-cv-01)
+└── zeroshot.py    — ZeroShotSemanticEngine, OWL-ViT (google/owlvit-base-patch32) (11-cv-02)
+```
+
+**Flujo (aún no conectado a /extract-geometry — pendiente 11-cv-03/04):**
+```
+SemanticEngine.detect(image_bytes, rooms, walls) → list[SemanticObject]
+```
+
+- `ZeroShotSemanticEngine`: OWL-ViT vía `transformers`, prompts de texto por cada `SemanticLabel` (bed/window/sofa/table/chair/door). `is_ready` refleja si los pesos cargaron en el constructor. `CV_MODEL_PATH` se reutiliza como directorio local de pesos si está seteado; si está vacío, usa el Hub de HuggingFace (`google/owlvit-base-patch32`) con caché local. `needs_review = confidence < CV_SEM_CONFIDENCE_MIN`. No resuelve `room_id` ni muta `walls/rooms/openings/stairs_candidates` (ADR-003) — la fusión geométrica es 11-cv-03.
+- Grounding DINO fue evaluado y descartado como default: soporte más débil en `transformers` sin extensión CUDA custom (ver docstring de `zeroshot.py`).
+
 ### config
 Configuración del servicio desde variables de entorno.
 
@@ -60,6 +77,7 @@ config/
 ## Patrones usados
 
 - **Strategy:** `engines/base.py` — `GeometryEngine` como interfaz intercambiable seleccionada por `CV_ENGINE` (ADR-008)
+- **Strategy:** `engines/semantic/base.py` — `SemanticEngine` análogo, seleccionado por `CV_SEM_ENGINE` (zeroshot=`ZeroShotSemanticEngine`/finetuned=diferido, ADR-002)
 - **Settings por env:** `config/settings.py` — umbrales de preflight configurables sin tocar código (ADR-005)
 - **Centralized DTOs:** `src/vitrina_cv/models.py` — única fuente de verdad de los tipos del contrato; espeja `cv-service.openapi.yaml` (ADR-003)
 
@@ -125,3 +143,4 @@ class GeometryEngine(ABC):
 
 - `OpenCVClassicEngine.extract()` es stub — lanza `NotImplementedError` hasta task 06-cv-03/04/05.
 - Umbrales de preflight (`CV_PREFLIGHT_MIN_*`) calibrados con imágenes sintéticas; calibración con planos reales en task 06-cv-07.
+- `ZeroShotSemanticEngine` (11-cv-02) aún no está conectado a `POST /extract-geometry` — `Geometry.objects` sigue vacío en producción hasta 11-cv-04. Fusión con `room_id`/openings pendiente en 11-cv-03.

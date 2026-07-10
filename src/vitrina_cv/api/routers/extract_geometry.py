@@ -18,6 +18,7 @@ from typing import Annotated
 from fastapi import APIRouter, File, Request, UploadFile, status
 from fastapi.responses import JSONResponse
 
+from vitrina_cv.engines.semantic.merge import merge_semantic
 from vitrina_cv.models import ErrorCode, Geometry
 
 router = APIRouter(tags=["geometry"])
@@ -150,6 +151,44 @@ async def extract_geometry(
             "openings": len(geometry.openings),
         },
     )
+
+    # Semantic track (run 11, ADR-004) — aditivo y best-effort. Cuando
+    # CV_SEM_ENGINE está off, semantic_engine es None y objects se queda en
+    # el default de Geometry ([]), sin overhead ni cambio de comportamiento
+    # (AC-2 spec-cv-service: walls/rooms/openings/stairs_candidates idénticos
+    # al baseline byte a byte).
+    #
+    # Manejo de errores: si el motor semántico falla en inferencia, la
+    # extracción geométrica ya es válida y completa — degradar a objects: []
+    # y loguear el error en vez de fallar toda la respuesta. El track
+    # semántico es aditivo/best-effort en esta fase (Fase A); una excepción
+    # ahí nunca debe convertir una extracción geométrica exitosa en un 5xx.
+    semantic_engine = getattr(request.app.state, "semantic_engine", None)
+    if semantic_engine is not None:
+        try:
+            objects = semantic_engine.detect(
+                image_bytes, geometry.rooms, geometry.walls
+            )
+            objects, dedup_count = merge_semantic(
+                objects, geometry.rooms, geometry.walls, geometry.openings
+            )
+            geometry = geometry.model_copy(update={"objects": objects})
+            needs_review_count = sum(1 for obj in objects if obj.needs_review)
+            logger.info(
+                "Semantic objects merged",
+                extra={
+                    "endpoint": endpoint,
+                    "semantic_objects_count": len(objects),
+                    "semantic_needs_review_count": needs_review_count,
+                    "semantic_dedup_vs_openings": dedup_count,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "Semantic engine failed; degrading to objects=[]",
+                extra={"endpoint": endpoint, "image_size": image_size},
+            )
+            geometry = geometry.model_copy(update={"objects": []})
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,

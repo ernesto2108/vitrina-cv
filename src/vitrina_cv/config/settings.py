@@ -94,6 +94,12 @@ Defaults:
                                                   stairs_candidates=[] and the pipeline
                                                   is identical to the pre-07-cv-10 behaviour.)
 
+  Semantic engine (run 11, ADR-002/ADR-004 — furniture/element detection):
+  CV_SEM_ENGINE                   = ""            (off/empty by default; 'zeroshot'
+                                                  Phase A, 'finetuned' Phase B deferred.
+                                                  See vitrina_cv.engines.semantic.)
+  CV_SEM_CONFIDENCE_MIN           = 0.5           (below this, SemanticObject.needs_review=true)
+
   PORT                            = 8000
 """
 
@@ -124,7 +130,34 @@ class Settings(BaseSettings):
     )
     cv_model_path: str = Field(
         default="",
-        description="Path to ML model weights. Optional/future — unused in Phase 1 (ADR-008).",
+        description=(
+            "Path to ML model weights. Optional/future — unused by the geometric "
+            "engine in Phase 1 (ADR-008). Reused by the semantic engine (run 11, "
+            "ADR-002/ADR-004) to load zero-shot weights (e.g. OWL-ViT) when "
+            "CV_SEM_ENGINE=zeroshot."
+        ),
+    )
+
+    # --- Semantic engine (run 11, ADR-002/ADR-004) ---
+    cv_sem_engine: str = Field(
+        default="",
+        description=(
+            "Active semantic engine (furniture/element detection, ADR-002). "
+            "'' (empty, default) or 'off' disables the semantic track entirely — "
+            "Geometry.objects is always []. 'zeroshot' = Phase A (OWL-ViT/Grounding "
+            "DINO). 'finetuned' = Phase B (YOLO-World, deferred). Analogous to "
+            "CV_ENGINE (ADR-008) but for the semantic classification track."
+        ),
+    )
+    cv_sem_confidence_min: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Confidence threshold below which a SemanticObject is marked "
+            "needs_review=true (ADR-002/ADR-004). Detections with "
+            "confidence >= this value are needs_review=false. Default: 0.5."
+        ),
     )
 
     # --- Preflight thresholds (ADR-005) ---

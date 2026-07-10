@@ -1,7 +1,7 @@
 # Context Navigator — vitrina-cv
 
 last_full_scan: 2026-07-02
-last_updated: 2026-07-09T00:00:00  # reporter delta: 10-cv-06 extensión de junction adaptativa (ADR-003 A2), setting CV_WALL_JUNCTION_EXTEND_ADAPTIVE_ENABLED
+last_updated: 2026-07-09T16:00:00  # reporter delta: 11-cv-05 observability-logs — merge_semantic retorna tuple (objects, dedup_count); log semantic_objects_count/semantic_needs_review_count/semantic_dedup_vs_openings tras merge en /extract-geometry
 coverage: bootstrap
 
 ## Índice

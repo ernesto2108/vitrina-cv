@@ -3,7 +3,7 @@
 <!-- Naming, estructura de carpetas, idioma del código, reglas de linting y patrones prohibidos.
      Complementado con patrones de diseño detectados automáticamente en el código. -->
 
-last_updated: 2026-07-08T02:00:00
+last_updated: 2026-07-09T16:00:00
 
 ## Idioma del código
 
@@ -304,6 +304,18 @@ Comandos:
 - **Verificado (overrides reales `docker-compose-local.yml`):** `plan-001-denso-achurado` (69 walls/9 rooms), `plan-002-simple-limpio` (26/6), `plan-003-reticula-cotas` (85/9), `plan-005-amueblado-limpio` (26/6) — idénticos con el flag on/off; sin regresión sobre baseline post-10-cv-01/10-cv-05.
 - **Cuándo usar:** al ajustar la lógica de tope de extensión de junction; único punto de cambio para ADR-003 parte A2.
 - **Anti-pattern:** calcular el tope solo contra el par ortogonal actual (i,j) sin considerar otros muros del plano — un tercer muro perpendicular más cercano es precisamente el caso que este fix debe capturar; aplicar el tope cuando `adaptive_cap_enabled=False` (debe ser no-op exacto).
+
+### merge_semantic retorna tupla (objects, dedup_count) — engines/semantic/merge.py (11-cv-05)
+- **Archivo:** `src/vitrina_cv/engines/semantic/merge.py`
+- **Qué hace:** `merge_semantic()` cambió su firma de retorno de `list[SemanticObject]` a `tuple[list[SemanticObject], int]` — el segundo elemento es `dedup_count`, cuántas detecciones semánticas se descartaron por solapar con un `Opening` geométrico ya existente. Alimenta el log `semantic_dedup_vs_openings` en `extract_geometry.py`.
+- **Cuándo usar:** todo caller de `merge_semantic` debe desempaquetar `objects, dedup_count = merge_semantic(...)`.
+- **Anti-pattern:** asumir que `merge_semantic` retorna solo la lista (breaking change respecto a 11-cv-03/11-cv-04).
+
+### Logging estructurado del track semántico — api/routers/extract_geometry.py (11-cv-05)
+- **Archivo:** `src/vitrina_cv/api/routers/extract_geometry.py`
+- **Qué hace:** tras `merge_semantic`, loguea INFO con `extra={"semantic_objects_count", "semantic_needs_review_count", "semantic_dedup_vs_openings"}` — sigue el mismo patrón de logging simétrico via `extra={}` ya usado en runs 09-10 (ver entrada "Logging estructurado por etapa con duration_ms").
+- **Cuándo usar:** al agregar nuevas métricas del track semántico, extender el mismo `extra={}` en vez de crear un logger paralelo.
+- **Anti-pattern:** loguear estas métricas dentro del bloque `except Exception` (solo aplica al happy path del merge).
 
 ### TYPE_CHECKING para imports de tipo-only
 - **Archivo:** `src/vitrina_cv/engines/base.py`, `engines/opencv_classic.py`, `preflight/checks.py`

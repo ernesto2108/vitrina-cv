@@ -41,7 +41,8 @@ COPY src/ ./src/
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONPATH="/app/src" \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    HF_HOME="/app/.cache/huggingface"
 
 # ─── Runtime defaults (all overridable via --env / env_file) ────────────────
 ENV CV_ENGINE="opencv" \
@@ -52,7 +53,11 @@ ENV CV_ENGINE="opencv" \
     PORT="8000"
 
 # Unprivileged user — no root in production.
-RUN useradd --no-create-home --shell /bin/false vitrina
+# HF_HOME (run 11, motor semántico) necesita un directorio de caché escribible
+# por el usuario sin privilegios — transformers falla al crearlo bajo /home.
+RUN useradd --no-create-home --shell /bin/false vitrina && \
+    mkdir -p /app/.cache/huggingface && \
+    chown -R vitrina:vitrina /app/.cache
 USER vitrina
 
 EXPOSE 8000

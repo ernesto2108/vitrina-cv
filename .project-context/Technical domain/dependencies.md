@@ -39,3 +39,6 @@ Listar los dominios downstream en el plan de cambio y validar cada uno antes de 
 | `uvicorn[standard]>=0.30` | librería Python | entrypoint | Servidor ASGI; `uvloop` incluido en `[standard]` |
 | `python-multipart>=0.0.9` | librería Python | `api/routers/` | Requerida por FastAPI para parsear `multipart/form-data` (UploadFile); agregada en 06-cv-06 |
 | `RasterScan` (futuro) | Docker comercial / REST | `engines/rasterscan` (por crear) | Evaluación en paralelo, sin deadline; no bloquea Fase 1 (ADR-008) |
+| `torch>=2.3` | librería Python | `engines/semantic/zeroshot` | Runtime de inferencia OWL-ViT (CPU/MPS local, GPU cloud en prod, ADR-002/arch-infra.md) |
+| `transformers>=4.42` | librería Python | `engines/semantic/zeroshot` | `OwlViTProcessor`/`OwlViTForObjectDetection`; pesos vía `CV_MODEL_PATH` o Hub (`google/owlvit-base-patch32`) |
+| `pillow>=10.3` | librería Python | `engines/semantic/zeroshot` | Decodifica PNG bytes a imagen RGB para el processor |

@@ -13,7 +13,6 @@ AC-10 no aplica: 10-cv-07 verifico que la fusion de room_9 ya no existe con
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any
